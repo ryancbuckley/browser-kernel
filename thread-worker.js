@@ -68,17 +68,24 @@ function prepare({ module, memory, channel, doorbell, syscalls }) {
   }
 }
 
-function start({ tid, startArg }) {
+/** Call wasm export `f`, through JSPI where the engine has it: then it runs on a stack the engine
+ *  allocates (about 1 MB in V8) instead of the worker thread's, which browsers keep small (about
+ *  360 KB in Chrome on macOS). Nothing suspends, since the system calls are synchronous. */
+async function call(f, ...args) {
+  return WebAssembly.promising ? WebAssembly.promising(f)(...args) : f(...args);
+}
+
+async function start({ tid, startArg }) {
   if (prepareError) {
     post({ type: "trap", message: `instantiation failed: ${prepareError.message}` });
     return;
   }
   try {
     if (startArg === null) {
-      instance.exports._start();
+      await call(instance.exports._start);
       post({ type: "exit" });
     } else {
-      instance.exports.wasi_thread_start(tid, startArg);
+      await call(instance.exports.wasi_thread_start, tid, startArg);
       post({ type: "thread-exit" });
     }
   } catch (e) {
