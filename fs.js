@@ -42,15 +42,22 @@ export class File {
   }
 
   /** Load the contents, if not yet loaded (the kernel does so when the file
-   *  is opened). Resolves when they are ready. */
+   *  is opened). Resolves when they are ready; if loading fails, the file
+   *  stays unloaded, so a later open tries again. */
   load() {
     if (!this.loader) return Promise.resolve();
-    this.loading ??= this.loader().then((data) => {
-      this.data = data;
-      this.size = data.length;
-      this.loader = null;
-      this.loading = null;
-    });
+    this.loading ??= this.loader().then(
+      (data) => {
+        this.data = data;
+        this.size = data.length;
+        this.loader = null;
+        this.loading = null;
+      },
+      (e) => {
+        this.loading = null;
+        throw e;
+      },
+    );
     return this.loading;
   }
 
