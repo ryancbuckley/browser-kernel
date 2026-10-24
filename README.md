@@ -61,3 +61,7 @@ node run.js [--dir host=guest]... [--program name=file.wasm]... [--env name=valu
 (set `WASI_SDK` to its directory) and runs them under the kernel.
 
 Originally part of `browser_rust_playground` (`web/kernel/`, as of its commit 399defd).
+
+## License
+
+Apache-2.0. See `LICENSE`.

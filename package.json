@@ -2,6 +2,7 @@
   "name": "wasi-kernel",
   "version": "0.1.0",
   "description": "A small WASI preview1 kernel with wasi-threads, for running wasm32-wasip1-threads programs in browsers and Node",
+  "license": "Apache-2.0",
   "type": "module",
   "exports": {
     ".": "./kernel.js",
