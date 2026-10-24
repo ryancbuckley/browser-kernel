@@ -1,0 +1,14 @@
+{
+  "name": "wasi-kernel",
+  "version": "0.1.0",
+  "description": "A small WASI preview1 kernel with wasi-threads, for running wasm32-wasip1-threads programs in browsers and Node",
+  "type": "module",
+  "exports": {
+    ".": "./kernel.js",
+    "./fs": "./fs.js",
+    "./node": "./node-host.js",
+    "./thread-worker": "./thread-worker.js"
+  },
+  "bin": { "wasi-kernel-run": "./run.js" },
+  "files": ["kernel.js", "fs.js", "thread-worker.js", "node-host.js", "run.js"]
+}
