@@ -51,7 +51,13 @@ from the page's origin, so serve these files alongside the page.
 From the command line:
 
 ```sh
-node run.js [--dir host=guest]... [--program name=file.wasm]... [--save guest=host]... prog.wasm [args...]
+node run.js [--dir host=guest]... [--program name=file.wasm]... [--env name=value]... \
+    [--save guest=host]... prog.wasm [args...]
 ```
+
+## Tests
+
+`npm test` compiles the C programs in `test/` with [wasi-sdk](https://github.com/WebAssembly/wasi-sdk)
+(set `WASI_SDK` to its directory) and runs them under the kernel.
 
 Originally part of `browser_rust_playground` (`web/kernel/`, as of its commit 399defd).

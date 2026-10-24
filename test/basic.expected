@@ -1,0 +1,15 @@
+arg 1: one
+arg 2: two words
+env: hi
+input: from the host
+size: 32, regular: 1
+entry: a.txt
+entry: b.txt
+renamed: 1, gone: 1
+missing: ENOENT
+slept >= 20ms: 1
+random: 1
+thread 0: 500500
+thread 1: 2001000
+thread 2: 4501500
+thread 3: 8002000
