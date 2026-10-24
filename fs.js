@@ -16,33 +16,52 @@ export class File {
     this.data = data; // capacity may exceed size
     this.size = data.length;
     this.mtime = BigInt(Date.now()) * 1000000n;
-    /** Compressed contents (raw deflate), until `unpack`. */
-    this.packed = null;
+    /** Produces the contents (a promise of a Uint8Array), until `load`. */
+    this.loader = null;
   }
 
-  /** A file of `size` bytes whose contents stay compressed until `unpack`. */
-  static compressed(packed, size) {
+  /** A file of `size` bytes whose contents `load()` (returning a promise of a
+   *  Uint8Array) produces when the file is first opened, e.g. by fetching it.
+   *  Until then only its size is known. */
+  static lazy(load, size) {
     const f = new File();
-    f.packed = packed;
+    f.loader = load;
     f.size = size;
     return f;
   }
 
-  /** Decompress the contents, if compressed (the kernel does so when the
-   *  file is opened). Resolves when they are ready. */
-  unpack() {
-    if (!this.packed) return Promise.resolve();
-    this.unpacking ??= inflate(this.packed).then((data) => {
+  /** A file of `size` bytes whose contents stay compressed (raw deflate)
+   *  until it is first opened. */
+  static compressed(packed, size) {
+    return File.lazy(() => inflate(packed), size);
+  }
+
+  /** Whether the contents have yet to be loaded. */
+  get pending() {
+    return this.loader !== null;
+  }
+
+  /** Load the contents, if not yet loaded (the kernel does so when the file
+   *  is opened). Resolves when they are ready. */
+  load() {
+    if (!this.loader) return Promise.resolve();
+    this.loading ??= this.loader().then((data) => {
       this.data = data;
-      this.packed = null;
-      this.unpacking = null;
+      this.size = data.length;
+      this.loader = null;
+      this.loading = null;
     });
-    return this.unpacking;
+    return this.loading;
+  }
+
+  /** `load`, under its name from when only compressed files were lazy. */
+  unpack() {
+    return this.load();
   }
 
   /** The contents, without spare capacity. */
   bytes() {
-    if (this.packed) throw new Error("the file has not been unpacked");
+    if (this.loader) throw new Error("the file has not been loaded");
     return this.data.subarray(0, this.size);
   }
 

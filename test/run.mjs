@@ -43,4 +43,36 @@ for (const t of tests) {
     console.log(`ok   ${t.name}`);
   }
 }
+// Lazy files: loaded when a program first opens them, and only then.
+{
+  const { Kernel } = await import("../kernel.js");
+  const { File } = await import("../fs.js");
+  const { createNodeWorker, loadProgram } = await import("../node-host.js");
+  const kernel = new Kernel({ createWorker: createNodeWorker });
+  const loads = { input: 0, unused: 0 };
+  const input = new TextEncoder().encode("from the host\n");
+  kernel.fs.mkdirp("/data").entries.set("input.txt", File.lazy(async () => {
+    loads.input++;
+    return input;
+  }, input.length));
+  kernel.fs.mkdirp("/data").entries.set("unused.txt", File.lazy(async () => {
+    loads.unused++;
+    return new Uint8Array(10);
+  }, 10));
+  let out = "";
+  const proc = kernel.spawn(loadProgram(join(work, "basic.wasm")), {
+    args: ["basic", "one", "two words"],
+    env: { GREETING: "hi" },
+    stdout: (b) => (out += new TextDecoder().decode(b)),
+  });
+  const code = await proc.exited;
+  const want = readFileSync(join(here, "basic.expected"), "utf8");
+  if (code !== 7 || out !== want || loads.input !== 1 || loads.unused !== 0) {
+    failures++;
+    console.log(`FAIL lazy files (exit ${code}, loads ${JSON.stringify(loads)})\n${out}`);
+  } else {
+    console.log("ok   lazy files");
+  }
+}
+
 process.exit(failures ? 1 : 0);

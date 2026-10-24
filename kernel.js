@@ -691,8 +691,13 @@ export class Kernel {
     if (path === null) return E.BADF;
     const oflags = u32(a[4]), fdflags = u32(a[7]);
     let node = this.fs.lookup(path);
-    // A compressed file is unpacked when first opened; then open it again.
-    if (node instanceof File && node.packed) return node.unpack().then(() => this.sys_path_open(p, a));
+    // A lazy file is loaded when first opened; then open it again.
+    if (node instanceof File && node.pending) {
+      return node.load().then(() => this.sys_path_open(p, a), (e) => {
+        p.onStderr(encoder.encode(`kernel: loading ${path} failed: ${e}\n`));
+        return E.IO;
+      });
+    }
     if (node && oflags & OFLAGS.EXCL && oflags & OFLAGS.CREAT) return E.EXIST;
     if (!node) {
       if (!(oflags & OFLAGS.CREAT)) return E.NOENT;
