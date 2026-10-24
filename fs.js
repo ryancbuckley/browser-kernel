@@ -18,15 +18,25 @@ export class File {
     this.mtime = BigInt(Date.now()) * 1000000n;
     /** Produces the contents (a promise of a Uint8Array), until `load`. */
     this.loader = null;
+    /** For an evictable file: produces the contents again after `evict`. */
+    this.reloader = null;
+    /** How many descriptors have it open. */
+    this.opens = 0;
   }
 
   /** A file of `size` bytes whose contents `load()` (returning a promise of a
    *  Uint8Array) produces when the file is first opened, e.g. by fetching it.
-   *  Until then only its size is known. */
-  static lazy(load, size) {
+   *  Until then only its size is known.
+   *
+   *  An `evictable` file drops its contents when no descriptor has it open
+   *  (and loads them again with `load` when next opened), until it is
+   *  written: for large read-only files that programs read once, which
+   *  would otherwise be held both here and in the program's memory. */
+  static lazy(load, size, { evictable = false } = {}) {
     const f = new File();
     f.loader = load;
     f.size = size;
+    if (evictable) f.reloader = load;
     return f;
   }
 
@@ -61,6 +71,14 @@ export class File {
     return this.loading;
   }
 
+  /** Drop an evictable file's contents if no descriptor has it open. */
+  evict() {
+    if (this.reloader && this.opens === 0 && !this.loader) {
+      this.data = new Uint8Array(0);
+      this.loader = this.reloader;
+    }
+  }
+
   /** `load`, under its name from when only compressed files were lazy. */
   unpack() {
     return this.load();
@@ -73,6 +91,7 @@ export class File {
   }
 
   resize(size) {
+    if (size !== this.size) this.reloader = null; // the contents are now its own
     if (size > this.data.length) {
       const grown = new Uint8Array(Math.max(size, this.data.length * 2, 64));
       grown.set(this.data.subarray(0, this.size));
@@ -85,6 +104,7 @@ export class File {
   }
 
   write(at, src) {
+    this.reloader = null;
     if (at + src.length > this.size) this.resize(at + src.length);
     this.data.set(src, at);
     this.mtime = BigInt(Date.now()) * 1000000n;

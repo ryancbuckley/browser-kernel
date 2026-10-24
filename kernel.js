@@ -106,6 +106,11 @@ function importedMemoryOrThrow(bytes) {
 class OpenFile {
   constructor(node, path, append) {
     this.node = node; this.path = path; this.pos = 0; this.append = append;
+    node.opens++;
+  }
+  close() {
+    this.node.opens--;
+    this.node.evict();
   }
 }
 class OpenDir {
@@ -392,6 +397,8 @@ export class Kernel {
   exit(proc, code) {
     if (proc.exitCode !== null) return;
     proc.exitCode = code;
+    for (const f of proc.fds.values()) f.close?.();
+    proc.fds.clear();
     // A killed compiler takes its linker with it.
     for (const child of proc.children) this.exit(child, code);
     for (const t of proc.threads) {
@@ -562,7 +569,13 @@ export class Kernel {
     return E.SUCCESS;
   }
 
-  sys_fd_close(p, a) { return p.fds.delete(u32(a[0])) ? E.SUCCESS : E.BADF; }
+  sys_fd_close(p, a) {
+    const f = p.fds.get(u32(a[0]));
+    if (!f) return E.BADF;
+    p.fds.delete(u32(a[0]));
+    f.close?.();
+    return E.SUCCESS;
+  }
   sys_fd_seek(p, a) {
     const f = p.fds.get(u32(a[0]));
     if (!f) return E.BADF;
@@ -648,6 +661,7 @@ export class Kernel {
     const f = p.fds.get(from);
     if (!f) return E.BADF;
     p.fds.delete(from);
+    p.fds.get(to)?.close?.();
     p.fds.set(to, f);
     return E.SUCCESS;
   }

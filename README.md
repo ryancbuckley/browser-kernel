@@ -14,7 +14,7 @@ descriptors. See the comment at the top of `kernel.js` for details.
 | File | |
 | :--- | :--- |
 | `kernel.js` | the kernel: system calls, processes, threads |
-| `fs.js` | the in-memory filesystem; files may be lazy (`File.lazy(load, size)`): loaded, e.g. fetched or decompressed, when a program first opens them |
+| `fs.js` | the in-memory filesystem; files may be lazy (`File.lazy(load, size)`): loaded, e.g. fetched or decompressed, when a program first opens them; and evictable (`{ evictable: true }`): dropped again when no descriptor has them open, for large read-only files a program copies into its own memory |
 | `thread-worker.js` | runs one wasm thread; works as a browser worker and a Node worker thread |
 | `node-host.js` | Node helpers: a `createWorker`, loading host directories and programs |
 | `run.js` | command-line runner for Node |

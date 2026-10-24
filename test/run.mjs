@@ -74,5 +74,37 @@ for (const t of tests) {
     console.log("ok   lazy files");
   }
 }
+// Evictable lazy files: dropped when closed, loaded again when next opened.
+{
+  const { Kernel } = await import("../kernel.js");
+  const { File } = await import("../fs.js");
+  const { createNodeWorker, loadProgram } = await import("../node-host.js");
+  const kernel = new Kernel({ createWorker: createNodeWorker });
+  let loads = 0;
+  const input = new TextEncoder().encode("from the host\n");
+  const file = File.lazy(async () => {
+    loads++;
+    return input;
+  }, input.length, { evictable: true });
+  kernel.fs.mkdirp("/data").entries.set("input.txt", file);
+  const want = readFileSync(join(here, "basic.expected"), "utf8");
+  const results = [];
+  for (let i = 0; i < 2; i++) {
+    kernel.fs.remove("/tmp"); // the program's own files, from the run before
+    let out = "";
+    const proc = kernel.spawn(loadProgram(join(work, "basic.wasm")), {
+      args: ["basic", "one", "two words"],
+      env: { GREETING: "hi" },
+      stdout: (b) => (out += new TextDecoder().decode(b)),
+    });
+    results.push([await proc.exited, out === want, file.pending, loads]);
+  }
+  if (JSON.stringify(results) !== JSON.stringify([[7, true, true, 1], [7, true, true, 2]])) {
+    failures++;
+    console.log(`FAIL evictable files: ${JSON.stringify(results)}`);
+  } else {
+    console.log("ok   evictable files");
+  }
+}
 
 process.exit(failures ? 1 : 0);
