@@ -148,8 +148,13 @@ export class Process {
     this.pid = pid;
     this.args = opts.args ?? ["program"];
     this.env = Object.entries(opts.env ?? {}).map(([k, v]) => `${k}=${v}`);
-    this.stdin = opts.stdin ?? new Uint8Array(0);
+    // `opts.stdin`: the bytes to read (then end of file), or "pipe" for input given later with
+    // `writeStdin`, until `closeStdin`
+    this.stdinPipe = opts.stdin === "pipe";
+    this.stdin = this.stdinPipe ? new Uint8Array(0) : opts.stdin ?? new Uint8Array(0);
     this.stdinPos = 0;
+    /** Reads of a piped stdin waiting for input. */
+    this.stdinWaiters = [];
     this.onStdout = opts.stdout ?? (() => {});
     this.onStderr = opts.stderr ?? (() => {});
     this.fds = new Map([[0, new Stdio(0)], [1, new Stdio(1)], [2, new Stdio(2)]]);
@@ -170,6 +175,26 @@ export class Process {
   view() { return new DataView(this.memory.buffer); }
   bytes(ptr, len) { return new Uint8Array(this.memory.buffer, ptr, len); }
   string(ptr, len) { return decoder.decode(this.bytes(ptr, len).slice()); }
+
+  /** Give a piped stdin more input. */
+  writeStdin(bytes) {
+    const rest = this.stdin.subarray(this.stdinPos);
+    this.stdin = new Uint8Array(rest.length + bytes.length);
+    this.stdin.set(rest);
+    this.stdin.set(bytes, rest.length);
+    this.stdinPos = 0;
+    this.wakeStdinReaders();
+  }
+
+  /** End a piped stdin: reads return end of file once its input is read. */
+  closeStdin() {
+    this.stdinPipe = false;
+    this.wakeStdinReaders();
+  }
+
+  wakeStdinReaders() {
+    for (const wake of this.stdinWaiters.splice(0)) wake();
+  }
 
   newFd(obj) {
     let fd = 3;
@@ -574,6 +599,11 @@ export class Kernel {
   read(p, fd, iovs, n, nreadPtr, at) {
     const f = p.fds.get(fd);
     if (!f || f instanceof OpenDir) return f ? E.ISDIR : E.BADF;
+    if (f instanceof Stdio && p.stdinPipe && p.stdinPos >= p.stdin.length) {
+      // block until there is input (or its end)
+      return new Promise((wake) => p.stdinWaiters.push(wake))
+        .then(() => this.read(p, fd, iovs, n, nreadPtr, at));
+    }
     const v = p.view();
     let total = 0;
     let pos = f instanceof Stdio ? p.stdinPos : at ?? f.pos;

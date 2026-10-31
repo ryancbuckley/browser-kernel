@@ -44,6 +44,10 @@ const proc = kernel.spawn({ bytes, module: await WebAssembly.compile(bytes) }, {
 console.log("exit code", await proc.exited);
 ```
 
+A process's stdin is the bytes given as `stdin` (empty by default), or, with `stdin: "pipe"`, the
+input the host gives it while it runs with `proc.writeStdin(bytes)`, until `proc.closeStdin()`:
+reading it then waits for input, so a program can serve requests.
+
 Pages need cross-origin isolation (`Cross-Origin-Opener-Policy: same-origin`,
 `Cross-Origin-Embedder-Policy: require-corp`) for `SharedArrayBuffer`. Module workers load
 from the page's origin, so serve these files alongside the page.

@@ -19,6 +19,7 @@ const work = mkdtempSync(join(tmpdir(), "wasi-kernel-test-"));
 
 const tests = [
   { name: "basic", args: ["one", "two words"], code: 7 },
+  { name: "pipe" },
 ];
 
 let failures = 0;
@@ -29,6 +30,7 @@ for (const t of tests) {
     join(here, `${t.name}.c`), "-o", wasm,
     "-Wl,--import-memory,--export-memory,--max-memory=67108864",
   ]);
+  if (t.code === undefined) continue; // run below, not through run.js
   const data = join(work, "data");
   mkdirSync(data, { recursive: true });
   writeFileSync(join(data, "input.txt"), "from the host\n");
@@ -104,6 +106,42 @@ for (const t of tests) {
     console.log(`FAIL evictable files: ${JSON.stringify(results)}`);
   } else {
     console.log("ok   evictable files");
+  }
+}
+// A piped stdin: written while the program runs, which waits for it.
+{
+  const { Kernel } = await import("../kernel.js");
+  const { createNodeWorker, loadProgram } = await import("../node-host.js");
+  const kernel = new Kernel({ createWorker: createNodeWorker });
+  let out = "";
+  let gotLine;
+  const proc = kernel.spawn(loadProgram(join(work, "pipe.wasm")), {
+    args: ["pipe"],
+    stdin: "pipe",
+    stdout: (b) => {
+      out += new TextDecoder().decode(b);
+      gotLine?.();
+    },
+  });
+  const line = () => new Promise((resolve) => (gotLine = resolve));
+  const encode = (s) => new TextEncoder().encode(s);
+  let reply = line();
+  proc.writeStdin(encode("one\n"));
+  await reply;
+  const first = out;
+  reply = line();
+  proc.writeStdin(encode("tw"));
+  await new Promise((r) => setTimeout(r, 50)); // half a line: no reply yet
+  const waited = out === first;
+  proc.writeStdin(encode("o\n"));
+  await reply;
+  proc.closeStdin();
+  const code = await proc.exited;
+  if (code !== 2 || first !== "got: one\n" || !waited || out !== "got: one\ngot: two\n") {
+    failures++;
+    console.log(`FAIL piped stdin (exit ${code}, waited ${waited})\n${out}`);
+  } else {
+    console.log("ok   piped stdin");
   }
 }
 
