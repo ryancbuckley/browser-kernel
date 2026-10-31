@@ -8,18 +8,24 @@
 //   { type: "start", tid, startArg }
 //       Run: with no `startArg` this is the main thread and runs `_start`;
 //       otherwise it runs `wasi_thread_start`.
+// And when the kernel is done with the thread:
+//   { type: "close" }
+//       Answer "closing" and close: the kernel terminates the worker only
+//       if it has not, still running wasm.
 
-const IDLE = 0, REQUEST = 1, DONE = 2;
+const IDLE = 0, REQUEST = 1, DONE = 2, KILLED = 4;
 const MAX_ARGS = 12;
 
-let post, onMessage;
+let post, onMessage, close;
 if (typeof process !== "undefined" && process.versions?.node) {
   const { parentPort } = await import("node:worker_threads");
   post = (m) => parentPort.postMessage(m);
   onMessage = (f) => parentPort.on("message", f);
+  close = () => process.exit(0);
 } else {
   post = (m) => self.postMessage(m);
   onMessage = (f) => { self.onmessage = (e) => f(e.data); };
+  close = () => self.close();
 }
 
 let instance = null;
@@ -28,6 +34,10 @@ let prepareError = null;
 onMessage((m) => {
   if (m.type === "prepare") prepare(m);
   else if (m.type === "start") start(m);
+  else if (m.type === "close") {
+    post({ type: "closing" });
+    close();
+  }
 });
 
 function prepare({ module, memory, channel, doorbell, syscalls }) {
@@ -38,14 +48,22 @@ function prepare({ module, memory, channel, doorbell, syscalls }) {
   const call = (nr, a) => {
     for (let i = 0; i < a.length; i++) args[i] = typeof a[i] === "bigint" ? a[i] : BigInt(a[i]);
     ctl[1] = nr;
-    Atomics.store(ctl, 0, REQUEST);
+    // KILLED: the process has ended. Leave the wait by throwing, out of the
+    // wasm too, back to the event loop, where the kernel's "close" is
+    // waiting: Safari cannot terminate a worker blocked in Atomics.wait,
+    // which then keeps the process's memory reserved for as long as the
+    // page's process lives.
+    if (Atomics.compareExchange(ctl, 0, IDLE, REQUEST) !== IDLE) throw new Error("killed");
     Atomics.add(bell, 0, 1);
     Atomics.notify(bell, 0);
     // Wait with the state just seen: reading it again for Atomics.wait could
     // see DONE, and then wait for DONE to change, forever.
-    for (let s; (s = Atomics.load(ctl, 0)) !== DONE;) Atomics.wait(ctl, 0, s);
+    for (let s; (s = Atomics.load(ctl, 0)) !== DONE;) {
+      if (s === KILLED) throw new Error("killed");
+      Atomics.wait(ctl, 0, s);
+    }
     const r = ctl[2];
-    Atomics.store(ctl, 0, IDLE);
+    if (Atomics.compareExchange(ctl, 0, DONE, IDLE) !== DONE) throw new Error("killed");
     return r;
   };
 

@@ -47,7 +47,7 @@ export const SYSCALLS = [
 // BigInt64 arguments from byte 16.
 export const CHANNEL_BYTES = 128;
 export const MAX_ARGS = 12;
-const IDLE = 0, REQUEST = 1, DONE = 2, BUSY = 3;
+const IDLE = 0, REQUEST = 1, DONE = 2, BUSY = 3, KILLED = 4;
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -194,8 +194,11 @@ export class Kernel {
    *   Programs `playground.spawn` can run, by `argv[0]`.
    * @param {number} [opts.pool] How many idle workers to keep ready, so that
    *   starting a thread does not wait for one to be created.
+   * @param {number | null} [opts.retireTimeout] How long, in ms, a finished
+   *   thread's worker has to close itself before it is terminated; null to
+   *   never terminate it (see `retire`).
    */
-  constructor({ fs = new MemFS(), createWorker, programs = {}, trace = null, pool = 0 }) {
+  constructor({ fs = new MemFS(), createWorker, programs = {}, trace = null, pool = 0, retireTimeout = 1000 }) {
     this.fs = fs;
     /** Called with a line of text for each system call and thread event. */
     this.trace = trace;
@@ -206,6 +209,7 @@ export class Kernel {
     this.nextTid = 1;
     this.nextPid = 1;
     this.poolSize = pool;
+    this.retireTimeout = retireTimeout;
     this.idleWorkers = [];
     /** For each module: the most threads a process of it has started. */
     this.threadsUsed = new WeakMap();
@@ -231,6 +235,17 @@ export class Kernel {
     const w = this.idleWorkers.pop() ?? this.createWorker();
     this.refillPool();
     return w;
+  }
+
+  /** Let go of a thread's worker. A worker terminated from outside keeps
+   *  the process's memory reserved in Safari (for as long as the page's
+   *  process lives, reloads included), so it is asked to close itself
+   *  (thread-worker.js), and terminated only if it has not within
+   *  `retireTimeout`: still running wasm. A killed process's thread closes
+   *  at its next system call, which throws (thread-worker.js). */
+  retire(t) {
+    if (this.retireTimeout !== null) t.retired = setTimeout(() => t.worker.terminate(), this.retireTimeout);
+    t.worker.postMessage({ type: "close" });
   }
 
   refillPool() {
@@ -290,7 +305,7 @@ export class Kernel {
   coolDown() {
     this.keptWarm.clear();
     for (const { threads } of this.warm.values()) {
-      for (const t of threads) t.worker.terminate();
+      for (const t of threads) this.retire(t);
     }
     this.warm.clear();
   }
@@ -371,6 +386,10 @@ export class Kernel {
   }
 
   onThreadMessage(t, m) {
+    if (m.type === "closing") {
+      clearTimeout(t.retired);
+      return;
+    }
     if (!this.threads.has(t.tid)) return;
     this.trace?.(`[${t.proc.pid}:${t.tid}] ${m.type}${m.message ? `: ${m.message}` : ""}`);
     if (m.type === "exit") {
@@ -379,7 +398,7 @@ export class Kernel {
     } else if (m.type === "thread-exit") {
       this.threads.delete(t.tid);
       t.proc.threads.delete(t);
-      t.worker.terminate();
+      this.retire(t);
     } else if (m.type === "trap") {
       // A Rust panic with panic=abort ends in `unreachable`, after printing
       // the panic message; the wasm stack is only interesting when tracing.
@@ -403,10 +422,14 @@ export class Kernel {
     for (const child of proc.children) this.exit(child, code);
     for (const t of proc.threads) {
       this.threads.delete(t.tid);
-      t.worker.terminate();
+      // Wake a thread waiting for a system call (thread-worker.js), so that
+      // it returns to its event loop and can close.
+      Atomics.store(t.ctl, 0, KILLED);
+      Atomics.notify(t.ctl, 0);
+      this.retire(t);
     }
     proc.threads.clear();
-    for (const t of proc.spares) t.worker.terminate();
+    for (const t of proc.spares) this.retire(t);
     proc.spares = [];
     this.threadsUsed.set(proc.module, Math.max(this.threadsUsed.get(proc.module) ?? 0, proc.started));
     // The next process of a kept-warm program, prepared while nothing runs.
