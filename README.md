@@ -17,6 +17,7 @@ descriptors. See the comment at the top of `kernel.js` for details.
 | `kernel.js` | the kernel: system calls, processes, threads |
 | `fs.js` | the in-memory filesystem; files may be lazy (`File.lazy(load, size)`): loaded, e.g. fetched or decompressed, when a program first opens them; and evictable (`{ evictable: true }`): dropped again when no descriptor has them open, for large read-only files a program copies into its own memory |
 | `thread-worker.js` | runs one wasm thread; works as a browser worker and a Node worker thread |
+| `browser-host.js` | `createBrowserWorker`, the `createWorker` for browsers, which reports a worker that fails (to load, or ended by the browser) so the process ends instead of waiting for it |
 | `node-host.js` | Node helpers: a `createWorker`, loading host directories and programs |
 | `run.js` | command-line runner for Node |
 
@@ -29,13 +30,9 @@ such as compilers that need to run a linker.
 
 ```js
 import { Kernel } from "./wasi-kernel/kernel.js";
+import { createBrowserWorker } from "./wasi-kernel/browser-host.js";
 
-const kernel = new Kernel({
-  createWorker: () => {
-    const w = new Worker(new URL("./wasi-kernel/thread-worker.js", import.meta.url), { type: "module" });
-    return { postMessage: (m) => w.postMessage(m), onMessage: (f) => (w.onmessage = (e) => f(e.data)), terminate: () => w.terminate() };
-  },
-});
+const kernel = new Kernel({ createWorker: createBrowserWorker });
 kernel.fs.writeFile("/work/input.txt", "hello");
 const bytes = new Uint8Array(await (await fetch("prog.wasm")).arrayBuffer());
 const proc = kernel.spawn({ bytes, module: await WebAssembly.compile(bytes) }, {
@@ -48,6 +45,9 @@ console.log("exit code", await proc.exited);
 A process's stdin is the bytes given as `stdin` (empty by default), or, with `stdin: "pipe"`, the
 input the host gives it while it runs with `proc.writeStdin(bytes)`, until `proc.closeStdin()`:
 reading it then waits for input, so a program can serve requests.
+
+`kernel.syscalls` counts the system calls made so far, by every process: a sign that a long-running
+program is making progress.
 
 Pages need cross-origin isolation (`Cross-Origin-Opener-Policy: same-origin`,
 `Cross-Origin-Embedder-Policy: require-corp`) for `SharedArrayBuffer`. Module workers load

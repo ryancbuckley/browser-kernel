@@ -4,12 +4,15 @@ import { Worker } from "node:worker_threads";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-/** A `createWorker` for the kernel that uses Node worker threads. */
-export function createNodeWorker() {
-  const w = new Worker(new URL("./thread-worker.js", import.meta.url));
+/** A `createWorker` for the kernel that uses Node worker threads (running `script`, for tests). */
+export function createNodeWorker(script = new URL("./thread-worker.js", import.meta.url)) {
+  const w = new Worker(script);
   return {
     postMessage: (m) => w.postMessage(m),
-    onMessage: (f) => w.on("message", f),
+    onMessage: (f) => {
+      w.on("message", f);
+      w.on("error", (e) => f({ type: "failed", message: e.message }));
+    },
     terminate: () => w.terminate(),
   };
 }

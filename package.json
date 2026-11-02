@@ -8,6 +8,7 @@
     ".": "./kernel.js",
     "./fs": "./fs.js",
     "./node": "./node-host.js",
+    "./browser": "./browser-host.js",
     "./thread-worker": "./thread-worker.js"
   },
   "bin": { "wasi-kernel-run": "./run.js" },
@@ -15,5 +16,5 @@
     "test": "node --test test/syscalls.test.mjs && node test/run.mjs",
     "test:unit": "node --test test/syscalls.test.mjs"
   },
-  "files": ["kernel.js", "fs.js", "thread-worker.js", "node-host.js", "run.js"]
+  "files": ["kernel.js", "fs.js", "thread-worker.js", "node-host.js", "browser-host.js", "run.js"]
 }

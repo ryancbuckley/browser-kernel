@@ -218,6 +218,10 @@ export class Kernel {
    * @param {object} opts
    * @param {MemFS} [opts.fs]
    * @param {() => {postMessage(m: any): void, onMessage(f: (m: any) => void): void, terminate(): void}} opts.createWorker
+   *   A worker running thread-worker.js (`createBrowserWorker`, browser-host.js;
+   *   `createNodeWorker`, node-host.js). Its `onMessage` also passes on
+   *   `{ type: "failed", message }` if the worker itself fails, which ends the
+   *   process the thread is in.
    * @param {Record<string, {module: WebAssembly.Module, bytes: Uint8Array}>} [opts.programs]
    *   Programs `playground.spawn` can run, by `argv[0]`.
    * @param {number} [opts.pool] How many idle workers to keep ready, so that
@@ -230,6 +234,8 @@ export class Kernel {
     this.fs = fs;
     /** Called with a line of text for each system call and thread event. */
     this.trace = trace;
+    /** System calls made so far, by every process: a sign of progress. */
+    this.syscalls = 0;
     this.createWorker = createWorker;
     this.programs = programs;
     this.doorbell = new Int32Array(new SharedArrayBuffer(4));
@@ -409,13 +415,22 @@ export class Kernel {
     proc.threads.add(t);
     proc.started++;
     this.trace?.(`[${proc.pid}:${t.tid}] start${startArg === null ? " main" : ` thread arg=${startArg}`}`);
-    t.worker.postMessage({ type: "start", tid: t.tid, startArg });
+    if (t.failed) {
+      // Its worker failed while the thread was prepared.
+      setTimeout(() => this.onThreadMessage(t, t.failed), 0);
+    } else {
+      t.worker.postMessage({ type: "start", tid: t.tid, startArg });
+    }
     return t.tid;
   }
 
   onThreadMessage(t, m) {
     if (m.type === "closing") {
       clearTimeout(t.retired);
+      return;
+    }
+    if (m.type === "failed" && t.tid === null) {
+      t.failed = m; // reported when the thread is started
       return;
     }
     if (!this.threads.has(t.tid)) return;
@@ -430,6 +445,7 @@ export class Kernel {
       // stack and TLS from its argument): starting one costs a worker and an instantiation, and
       // some programs (Lean's language server) start thousands of short-lived threads.
       if (t.proc.exitCode === null && t.proc.spares.length < MAX_SPARE_THREADS) {
+        t.tid = null; // prepared again: a failure now is reported when it next starts
         t.proc.spares.push(t);
       } else {
         this.retire(t);
@@ -439,6 +455,10 @@ export class Kernel {
       // the panic message; the wasm stack is only interesting when tracing.
       const stack = this.trace && m.stack ? `${m.stack}\n` : "";
       t.proc.onStderr(encoder.encode(`error: the program trapped (${m.message})\n${stack}`));
+      this.exit(t.proc, 134);
+    } else if (m.type === "failed") {
+      // Without it, the process would wait for this thread forever.
+      t.proc.onStderr(encoder.encode(`error: a thread's worker stopped: ${m.message}\n`));
       this.exit(t.proc, 134);
     }
   }
@@ -473,6 +493,7 @@ export class Kernel {
   }
 
   dispatch(t) {
+    this.syscalls++;
     const name = SYSCALLS[t.ctl[1]];
     const handler = this[`sys_${name}`];
     let r;

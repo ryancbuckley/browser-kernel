@@ -236,4 +236,45 @@ for (const t of tests) {
   }
 }
 
+// A thread's worker failing: the process ends (rather than waiting for the thread forever), whether
+// the worker fails to load or dies while kept for the process's next thread.
+{
+  const { Kernel } = await import("../kernel.js");
+  const { createNodeWorker, loadProgram } = await import("../node-host.js");
+  const broken = new URL("data:text/javascript,throw new Error('no such worker')");
+  const cases = [
+    // the second worker (the first thread's) does not load
+    { name: "fails to load", program: "exit", args: ["thread-exit"], worker: (n) => createNodeWorker(n === 2 ? broken : undefined), stderr: /no such worker/ },
+    // the second worker dies after running its first thread, while kept for the next
+    {
+      name: "dies while kept", program: "churn", args: [], stderr: /died/,
+      worker: (n) => {
+        const w = createNodeWorker();
+        if (n !== 2) return w;
+        return { ...w, onMessage: (f) => w.onMessage((m) => {
+          f(m);
+          if (m.type === "thread-exit") f({ type: "failed", message: "died" });
+        }) };
+      },
+    },
+  ];
+  for (const c of cases) {
+    let n = 0;
+    const kernel = new Kernel({ createWorker: () => c.worker(++n), retireTimeout: 200 });
+    let err = "";
+    const proc = kernel.spawn(loadProgram(join(work, `${c.program}.wasm`)), {
+      args: [c.program, ...c.args],
+      stderr: (b) => (err += new TextDecoder().decode(b)),
+    });
+    const code = await Promise.race([proc.exited, new Promise((r) => setTimeout(() => r("hung"), 5000))]);
+    if (code !== 134 || !c.stderr.test(err)) {
+      failures++;
+      console.log(`FAIL worker ${c.name}: exit ${code}, stderr ${JSON.stringify(err)}`);
+      if (code === "hung") kernel.kill(proc);
+    } else {
+      console.log(`ok   worker ${c.name}`);
+    }
+  }
+}
+
 process.exit(failures ? 1 : 0);
