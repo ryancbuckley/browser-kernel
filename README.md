@@ -1,4 +1,4 @@
-# wasi-kernel
+# browser-kernel
 
 A small [WASI preview1](https://github.com/WebAssembly/WASI/blob/main/legacy/preview1/docs.md)
 "kernel" with [wasi-threads](https://github.com/WebAssembly/wasi-threads), for running
@@ -29,8 +29,8 @@ such as compilers that need to run a linker.
 ## Use
 
 ```js
-import { Kernel } from "./wasi-kernel/kernel.js";
-import { createBrowserWorker } from "./wasi-kernel/browser-host.js";
+import { Kernel } from "./browser-kernel/kernel.js";
+import { createBrowserWorker } from "./browser-kernel/browser-host.js";
 
 const kernel = new Kernel({ createWorker: createBrowserWorker });
 kernel.fs.writeFile("/work/input.txt", "hello");

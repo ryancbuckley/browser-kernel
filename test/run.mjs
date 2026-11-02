@@ -15,7 +15,7 @@ if (!sdk) {
   console.error("set WASI_SDK to a wasi-sdk directory");
   process.exit(2);
 }
-const work = mkdtempSync(join(tmpdir(), "wasi-kernel-test-"));
+const work = mkdtempSync(join(tmpdir(), "browser-kernel-test-"));
 
 const tests = [
   { name: "basic", args: ["one", "two words"], code: 7 },

@@ -1,5 +1,5 @@
 {
-  "name": "wasi-kernel",
+  "name": "browser-kernel",
   "version": "0.1.0",
   "description": "A small WASI preview1 kernel with wasi-threads, for running wasm32-wasip1-threads programs in browsers and Node",
   "license": "Apache-2.0",
@@ -11,7 +11,7 @@
     "./browser": "./browser-host.js",
     "./thread-worker": "./thread-worker.js"
   },
-  "bin": { "wasi-kernel-run": "./run.js" },
+  "bin": { "browser-kernel-run": "./run.js" },
   "scripts": {
     "test": "node --test test/syscalls.test.mjs && node test/run.mjs",
     "test:unit": "node --test test/syscalls.test.mjs"
