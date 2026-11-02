@@ -14,12 +14,20 @@
 //       Answer "closing" and close: the kernel terminates the worker only
 //       if it has not, still running wasm.
 
+/** @import { FromThread, ToThread } from "./kernel.js" */
+
 const IDLE = 0, REQUEST = 1, DONE = 2, KILLED = 4;
 const MAX_ARGS = 12;
 
-let post, onMessage, close;
+/** @type {(m: FromThread) => void} */
+let post;
+/** @type {(f: (m: ToThread) => void) => void} */
+let onMessage;
+/** @type {() => void} */
+let close;
 if (typeof process !== "undefined" && process.versions?.node) {
   const { parentPort } = await import("node:worker_threads");
+  if (!parentPort) throw new Error("thread-worker.js runs in a worker thread");
   post = (m) => parentPort.postMessage(m);
   onMessage = (f) => parentPort.on("message", f);
   close = () => process.exit(0);
@@ -29,8 +37,10 @@ if (typeof process !== "undefined" && process.versions?.node) {
   close = () => self.close();
 }
 
+/** @type {WebAssembly.Instance | null} */
 let instance = null;
-let prepareError = null;
+/** Why instantiating failed, if it did. */
+let prepareError = "";
 
 onMessage((m) => {
   if (m.type === "prepare") prepare(m);
@@ -41,13 +51,16 @@ onMessage((m) => {
   }
 });
 
+/** @param {Extract<ToThread, { type: "prepare" }>} m */
 function prepare({ module, memory, channel, doorbell, syscalls }) {
   const ctl = new Int32Array(channel, 0, 4);
   const args = new BigInt64Array(channel, 16, MAX_ARGS);
   const bell = new Int32Array(doorbell);
 
+  /** Make system call `nr`: its result, or a throw if the process has ended.
+   *  @param {number} nr @param {(number | bigint)[]} a */
   const call = (nr, a) => {
-    for (let i = 0; i < a.length; i++) args[i] = typeof a[i] === "bigint" ? a[i] : BigInt(a[i]);
+    a.forEach((x, i) => (args[i] = typeof x === "bigint" ? x : BigInt(x)));
     ctl[1] = nr;
     // KILLED: the process has ended. Leave the wait by throwing, out of the
     // wasm too, back to the event loop, where the kernel's "close" is
@@ -68,6 +81,7 @@ function prepare({ module, memory, channel, doorbell, syscalls }) {
     return r;
   };
 
+  /** @type {Record<string, (...a: (number | bigint)[]) => number>} */
   const wasi = {};
   syscalls.forEach((name, nr) => {
     wasi[name] = (...a) => call(nr, a);
@@ -83,31 +97,39 @@ function prepare({ module, memory, channel, doorbell, syscalls }) {
     instance = new WebAssembly.Instance(module, imports);
   } catch (e) {
     // Reported when the thread is started.
-    prepareError = e;
+    prepareError = e instanceof Error ? e.message : String(e);
   }
 }
+
+/** @typedef {(...args: number[]) => unknown} WasmFunction */
+
+/** JSPI's `WebAssembly.promising`, where the engine has it (TypeScript's types do not, yet). */
+const promising = /** @type {{ promising?: (f: WasmFunction) => WasmFunction }} */ (WebAssembly).promising;
 
 /** Call wasm export `f`, through JSPI where the engine has it: then it runs on a stack the engine
  *  allocates (about 1 MB in V8) instead of the worker thread's, which browsers keep small (about
- *  360 KB in Chrome on macOS). Nothing suspends, since the system calls are synchronous. */
+ *  360 KB in Chrome on macOS). Nothing suspends, since the system calls are synchronous.
+ *  @param {WasmFunction} f @param {number[]} args */
 async function call(f, ...args) {
-  return WebAssembly.promising ? WebAssembly.promising(f)(...args) : f(...args);
+  return promising ? promising(f)(...args) : f(...args);
 }
 
+/** @param {Extract<ToThread, { type: "start" }>} m */
 async function start({ tid, startArg }) {
-  if (prepareError) {
-    post({ type: "trap", message: `instantiation failed: ${prepareError.message}` });
+  if (!instance) {
+    post({ type: "trap", message: `instantiation failed: ${prepareError}` });
     return;
   }
+  const exports = /** @type {Record<string, WasmFunction>} */ (instance.exports);
   try {
     if (startArg === null) {
-      await call(instance.exports._start);
+      await call(exports._start);
       post({ type: "exit" });
     } else {
-      await call(instance.exports.wasi_thread_start, tid, startArg);
+      await call(exports.wasi_thread_start, tid, startArg);
       post({ type: "thread-exit" });
     }
   } catch (e) {
-    post({ type: "trap", message: e.message, stack: e.stack });
+    post(e instanceof Error ? { type: "trap", message: e.message, stack: e.stack } : { type: "trap", message: String(e) });
   }
 }

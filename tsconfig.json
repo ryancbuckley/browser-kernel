@@ -1,0 +1,16 @@
+{
+  // Type-checks the JavaScript (types are in JSDoc comments); nothing is built.
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    // Fields that are set after construction (`Process.memory`) are declared with their types.
+    "strictPropertyInitialization": false,
+    "target": "es2024",
+    "module": "nodenext",
+    "lib": ["es2024", "dom"],
+    "types": ["node"]
+  },
+  "files": ["kernel.js", "fs.js", "thread-worker.js", "browser-host.js", "node-host.js", "run.js"]
+}

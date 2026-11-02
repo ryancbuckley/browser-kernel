@@ -11,10 +11,24 @@
     "./browser": "./browser-host.js",
     "./thread-worker": "./thread-worker.js"
   },
-  "bin": { "browser-kernel-run": "./run.js" },
-  "scripts": {
-    "test": "node --test test/syscalls.test.mjs && node test/run.mjs",
-    "test:unit": "node --test test/syscalls.test.mjs"
+  "bin": {
+    "browser-kernel-run": "./run.js"
   },
-  "files": ["kernel.js", "fs.js", "thread-worker.js", "node-host.js", "browser-host.js", "run.js"]
+  "scripts": {
+    "test": "tsc -p . && node --test test/syscalls.test.mjs && node test/run.mjs",
+    "test:unit": "node --test test/syscalls.test.mjs",
+    "check": "tsc -p ."
+  },
+  "files": [
+    "kernel.js",
+    "fs.js",
+    "thread-worker.js",
+    "node-host.js",
+    "browser-host.js",
+    "run.js"
+  ],
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "typescript": "7.0.2"
+  }
 }

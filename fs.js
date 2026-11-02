@@ -5,21 +5,25 @@
 
 let nextIno = 1n;
 
+/** @param {Uint8Array<ArrayBuffer>} packed */
 async function inflate(packed) {
   const stream = new Blob([packed]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
 export class File {
+  /** @param {Uint8Array} [data] */
   constructor(data = new Uint8Array(0)) {
     this.ino = nextIno++;
     this.data = data; // capacity may exceed size
     this.size = data.length;
     this.mtime = BigInt(Date.now()) * 1000000n;
-    /** Produces the contents (a promise of a Uint8Array), until `load`. */
+    /** Produces the contents, until `load`. @type {(() => Promise<Uint8Array>) | null} */
     this.loader = null;
-    /** For an evictable file: produces the contents again after `evict`. */
+    /** For an evictable file: produces the contents again after `evict`. @type {(() => Promise<Uint8Array>) | null} */
     this.reloader = null;
+    /** The load under way. @type {Promise<void> | null} */
+    this.loading = null;
     /** How many descriptors have it open. */
     this.opens = 0;
   }
@@ -31,7 +35,8 @@ export class File {
    *  An `evictable` file drops its contents when no descriptor has it open
    *  (and loads them again with `load` when next opened), until it is
    *  written: for large read-only files that programs read once, which
-   *  would otherwise be held both here and in the program's memory. */
+   *  would otherwise be held both here and in the program's memory.
+   *  @param {() => Promise<Uint8Array>} load @param {number} size */
   static lazy(load, size, { evictable = false } = {}) {
     const f = new File();
     f.loader = load;
@@ -41,7 +46,8 @@ export class File {
   }
 
   /** A file of `size` bytes whose contents stay compressed (raw deflate)
-   *  until it is first opened. */
+   *  until it is first opened.
+   *  @param {Uint8Array<ArrayBuffer>} packed @param {number} size */
   static compressed(packed, size) {
     return File.lazy(() => inflate(packed), size);
   }
@@ -53,7 +59,8 @@ export class File {
 
   /** Load the contents, if not yet loaded (the kernel does so when the file
    *  is opened). Resolves when they are ready; if loading fails, the file
-   *  stays unloaded, so a later open tries again. */
+   *  stays unloaded, so a later open tries again.
+   *  @returns {Promise<void>} */
   load() {
     if (!this.loader) return Promise.resolve();
     this.loading ??= this.loader().then(
@@ -63,7 +70,7 @@ export class File {
         this.loader = null;
         this.loading = null;
       },
-      (e) => {
+      (/** @type {unknown} */ e) => {
         this.loading = null;
         throw e;
       },
@@ -90,6 +97,7 @@ export class File {
     return this.data.subarray(0, this.size);
   }
 
+  /** @param {number} size */
   resize(size) {
     if (size !== this.size) this.reloader = null; // the contents are now its own
     if (size > this.data.length) {
@@ -103,6 +111,7 @@ export class File {
     this.mtime = BigInt(Date.now()) * 1000000n;
   }
 
+  /** @param {number} at @param {Uint8Array} src */
   write(at, src) {
     this.reloader = null;
     if (at + src.length > this.size) this.resize(at + src.length);
@@ -115,15 +124,19 @@ export class File {
  *  positions `fd_readdir` resumes from, which stay put when other names are removed (as programs
  *  do while reading a directory to delete it), unlike indices. They follow the Map's order, since
  *  setting a name it has keeps both its place and its number. */
+/** @extends {Map<string, File | Dir>} */
 class Entries extends Map {
+  /** @type {Map<string, number>} */
   seqs = new Map();
   lastSeq = 0;
 
+  /** @param {string} name @param {File | Dir} node */
   set(name, node) {
     if (!this.has(name)) this.seqs.set(name, ++this.lastSeq);
     return super.set(name, node);
   }
 
+  /** @param {string} name */
   delete(name) {
     this.seqs.delete(name);
     return super.delete(name);
@@ -134,10 +147,11 @@ class Entries extends Map {
     super.clear();
   }
 
-  /** The entries numbered above `seq`, with their numbers, in order. */
+  /** The entries numbered above `seq`, with their numbers, in order.
+   *  @param {number} seq @returns {Generator<[string, File | Dir, number]>} */
   *after(seq) {
     for (const [name, node] of this) {
-      const n = this.seqs.get(name);
+      const n = /** @type {number} */ (this.seqs.get(name));
       if (n > seq) yield [name, node, n];
     }
   }
@@ -146,14 +160,15 @@ class Entries extends Map {
 export class Dir {
   constructor() {
     this.ino = nextIno++;
-    /** @type {Map<string, File | Dir>} */
     this.entries = new Entries();
     this.mtime = BigInt(Date.now()) * 1000000n;
   }
 }
 
-/** Split an absolute path into components, resolving `.` and `..`. */
+/** Split an absolute path into components, resolving `.` and `..`.
+ *  @param {string} path */
 export function components(path) {
+  /** @type {string[]} */
   const out = [];
   for (const part of path.split("/")) {
     if (part === "" || part === ".") continue;
@@ -163,6 +178,7 @@ export function components(path) {
   return out;
 }
 
+/** @param {string} base @param {string} rel */
 export function join(base, rel) {
   if (rel.startsWith("/")) return rel;
   return base.endsWith("/") ? base + rel : base + "/" + rel;
@@ -173,8 +189,10 @@ export class MemFS {
     this.root = new Dir();
   }
 
-  /** The node at `path`, or null. */
+  /** The node at `path`, or null.
+   *  @param {string} path @returns {File | Dir | null} */
   lookup(path) {
+    /** @type {File | Dir | undefined} */
     let node = this.root;
     for (const name of components(path)) {
       if (!(node instanceof Dir)) return null;
@@ -185,10 +203,12 @@ export class MemFS {
   }
 
   /** The directory that would contain `path` and the last component, or
-   *  null if that directory does not exist. */
+   *  null if that directory does not exist.
+   *  @param {string} path @returns {[Dir, string] | null} */
   parent(path) {
     const parts = components(path);
-    const name = parts.pop();
+    const name = parts.pop() ?? "";
+    /** @type {File | Dir | null | undefined} */
     let node = this.root;
     for (const p of parts) {
       node = node instanceof Dir ? node.entries.get(p) : null;
@@ -198,6 +218,8 @@ export class MemFS {
     return [node, name];
   }
 
+  /** The directory at `path`, made with any directories above it that are missing.
+   *  @param {string} path */
   mkdirp(path) {
     let node = this.root;
     for (const name of components(path)) {
@@ -206,25 +228,29 @@ export class MemFS {
         next = new Dir();
         node.entries.set(name, next);
       }
+      if (!(next instanceof Dir)) throw new Error(`${path}: ${name} is not a directory`);
       node = next;
     }
     return node;
   }
 
+  /** @param {string} path @param {Uint8Array | string} bytes */
   writeFile(path, bytes) {
     const parts = components(path);
-    const name = parts.pop();
+    const name = parts.pop() ?? "";
     const dir = this.mkdirp("/" + parts.join("/"));
     const file = new File(bytes instanceof Uint8Array ? bytes : new TextEncoder().encode(bytes));
     dir.entries.set(name, file);
     return file;
   }
 
+  /** @param {string} path */
   readFile(path) {
     const node = this.lookup(path);
     return node instanceof File ? node.bytes() : null;
   }
 
+  /** @param {string} path */
   remove(path) {
     const p = this.parent(path);
     if (p) p[0].entries.delete(p[1]);

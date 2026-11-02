@@ -15,10 +15,16 @@ const kernel = new Kernel({
   createWorker: createNodeWorker,
   trace: process.env.KERNEL_TRACE ? (line) => process.stderr.write(line + "\n") : null,
 });
+/** @type {[string, string][]} */
 const saves = [];
+/** @type {Record<string, string>} */
 const env = { RUST_BACKTRACE: process.env.RUST_BACKTRACE ?? "0" };
 while (argv[0]?.startsWith("--")) {
   const [flag, value] = [argv.shift(), argv.shift()];
+  if (value === undefined) {
+    process.stderr.write(`run.js: ${flag} needs a value\n`);
+    process.exit(2);
+  }
   const [a, b] = value.split(/=(.*)/s);
   if (flag === "--dir") loadDir(kernel.fs, a, b);
   else if (flag === "--program") kernel.programs[a] = loadProgram(b);
