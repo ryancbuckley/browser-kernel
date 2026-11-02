@@ -385,12 +385,14 @@ export class Kernel {
     return w;
   }
 
-  /** Let go of a thread's worker. A worker terminated from outside keeps
-   *  the process's memory reserved in Safari (for as long as the page's
-   *  process lives, reloads included), so it is asked to close itself
-   *  (thread-worker.js), and terminated only if it has not within
-   *  `retireTimeout`: still running wasm. A killed process's thread closes
-   *  at its next system call, which throws (thread-worker.js).
+  /** Let go of a thread's worker. A worker terminated while it runs wasm
+   *  keeps the process's memory reserved in Safari (for as long as the
+   *  page's process lives, reloads included); one terminated while idle or
+   *  waiting (`Atomics.wait`, from JS or wasm) does not. So it is asked to
+   *  close itself (thread-worker.js), and terminated only if it has not
+   *  within `retireTimeout`: still running wasm, or waiting on a futex. A
+   *  killed process's thread closes at its next system call, which throws
+   *  (thread-worker.js).
    *  @param {Thread} t */
   retire(t) {
     if (this.retireTimeout !== null) t.retired = setTimeout(() => t.worker.terminate(), this.retireTimeout);

@@ -12,7 +12,7 @@
 // And when the kernel is done with the thread:
 //   { type: "close" }
 //       Answer "closing" and close: the kernel terminates the worker only
-//       if it has not, still running wasm.
+//       if it has not, still running wasm or waiting on a futex.
 
 /** @import { FromThread, ToThread } from "./kernel.js" */
 
@@ -64,9 +64,8 @@ function prepare({ module, memory, channel, doorbell, syscalls }) {
     ctl[1] = nr;
     // KILLED: the process has ended. Leave the wait by throwing, out of the
     // wasm too, back to the event loop, where the kernel's "close" is
-    // waiting: Safari cannot terminate a worker blocked in Atomics.wait,
-    // which then keeps the process's memory reserved for as long as the
-    // page's process lives.
+    // waiting: the worker closes at once, instead of being terminated after
+    // `retireTimeout` (or, without one, never).
     if (Atomics.compareExchange(ctl, 0, IDLE, REQUEST) !== IDLE) throw new Error("killed");
     Atomics.add(bell, 0, 1);
     Atomics.notify(bell, 0);
