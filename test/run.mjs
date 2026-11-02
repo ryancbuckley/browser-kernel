@@ -21,6 +21,7 @@ const tests = [
   { name: "basic", args: ["one", "two words"], code: 7 },
   { name: "pipe" },
   { name: "churn" },
+  { name: "exit" },
 ];
 
 let failures = 0;
@@ -163,6 +164,75 @@ for (const t of tests) {
     console.log(`FAIL piped stdin (exit ${code}, waited ${waited})\n${out}`);
   } else {
     console.log("ok   piped stdin");
+  }
+}
+
+// A process with threads ending: its exit code, and then every worker ends. A worker closes
+// itself when asked (thread-worker.js) unless it is running wasm, a thread waiting on a futex
+// included: then the kernel terminates it, which in Safari keeps the process's memory reserved, so
+// only the cases with such a thread may need it.
+{
+  const { Kernel } = await import("../kernel.js");
+  const { loadProgram } = await import("../node-host.js");
+  const { Worker } = await import("node:worker_threads");
+  const program = loadProgram(join(work, "exit.wasm"));
+  const cases = [
+    { mode: "thread-exit", code: [5], terminated: true }, // the main thread waits in pthread_join
+    { mode: "thread-trap", code: [134], terminated: true, stderr: /the program trapped/ },
+    { mode: "negative", code: [255], terminated: true },
+    { mode: "race", code: [10, 11, 12, 13, 14, 15, 16, 17], terminated: true },
+    { mode: "futex", code: [3], terminated: true },
+    { mode: "stdin", code: [4], stdin: "pipe" },
+    { mode: "sleep", code: [6] },
+    { mode: "return", code: [0], terminated: true },
+    { mode: "spin", code: [137], terminated: true, kill: true },
+    { mode: "spare", code: [7] },
+  ];
+  for (const c of cases) {
+    const workers = [];
+    const kernel = new Kernel({
+      retireTimeout: 200,
+      createWorker: () => {
+        const w = new Worker(new URL("../thread-worker.js", import.meta.url));
+        const rec = { ended: false, terminated: false };
+        w.on("exit", () => (rec.ended = true));
+        workers.push(rec);
+        return {
+          postMessage: (m) => w.postMessage(m),
+          onMessage: (f) => w.on("message", f),
+          terminate: () => { rec.terminated = true; return w.terminate(); },
+        };
+      },
+    });
+    let out = "", err = "";
+    const proc = kernel.spawn(program, {
+      args: ["exit", c.mode], stdin: c.stdin,
+      stdout: (b) => (out += new TextDecoder().decode(b)),
+      stderr: (b) => (err += new TextDecoder().decode(b)),
+    });
+    if (c.kill) {
+      while (!out) await new Promise((r) => setTimeout(r, 10));
+      await new Promise((r) => setTimeout(r, 50));
+      kernel.kill(proc);
+    }
+    const code = await proc.exited;
+    const deadline = Date.now() + 3000;
+    while (workers.some((w) => !w.ended) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    const left = workers.filter((w) => !w.ended).length;
+    const terminated = workers.filter((w) => w.terminated).length;
+    const problems = [
+      !c.code.includes(code) && `exit code ${code}, want ${c.code.join(" or ")}`,
+      out !== `${c.mode}\n` && `stdout ${JSON.stringify(out)}`,
+      c.stderr ? !c.stderr.test(err) && `stderr ${JSON.stringify(err)}` : err && `stderr ${JSON.stringify(err)}`,
+      left && `${left} of ${workers.length} workers still running`,
+      terminated && !c.terminated && `${terminated} workers terminated rather than closed`,
+    ].filter(Boolean);
+    if (problems.length) {
+      failures++;
+      console.log(`FAIL exit: ${c.mode}: ${problems.join("; ")}`);
+    } else {
+      console.log(`ok   exit: ${c.mode} (${workers.length} workers, ${terminated} terminated)`);
+    }
   }
 }
 

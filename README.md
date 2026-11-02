@@ -62,8 +62,12 @@ node run.js [--dir host=guest]... [--program name=file.wasm]... [--env name=valu
 
 ## Tests
 
-`npm test` compiles the C programs in `test/` with [wasi-sdk](https://github.com/WebAssembly/wasi-sdk)
-(set `WASI_SDK` to its directory) and runs them under the kernel.
+`npm run test:unit` calls the system calls directly on a process with a plain memory
+(`test/syscalls.test.mjs`: files, directories, paths, descriptors, lazy files, stdin, clocks), with
+nothing to build. `npm test` runs those, then compiles the C programs in `test/` with
+[wasi-sdk](https://github.com/WebAssembly/wasi-sdk) (set `WASI_SDK` to its directory) and runs them
+under the kernel: system calls from real programs, threads, and processes with threads ending in
+each way they can (`test/exit.c`), checking that every worker ends after.
 
 Originally part of `browser_rust_playground` (`web/kernel/`, as of its commit 399defd).
 

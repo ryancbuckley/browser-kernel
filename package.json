@@ -11,6 +11,9 @@
     "./thread-worker": "./thread-worker.js"
   },
   "bin": { "wasi-kernel-run": "./run.js" },
-  "scripts": { "test": "node test/run.mjs" },
+  "scripts": {
+    "test": "node --test test/syscalls.test.mjs && node test/run.mjs",
+    "test:unit": "node --test test/syscalls.test.mjs"
+  },
   "files": ["kernel.js", "fs.js", "thread-worker.js", "node-host.js", "run.js"]
 }
