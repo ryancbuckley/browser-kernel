@@ -15,12 +15,12 @@
 // Programs must import their memory (`env.memory`, shared), as
 // wasm32-wasip1-threads programs do; the kernel creates it.
 
-import { Dir, File, MemFS, join } from "./fs.js";
+import { Dir, File, MemFS, components, join } from "./fs.js";
 
 export const E = {
   SUCCESS: 0, ACCES: 2, AGAIN: 6, BADF: 8, CHILD: 12, EXIST: 20, FAULT: 21,
   INVAL: 28, IO: 29, ISDIR: 31, NAMETOOLONG: 37, NOENT: 44, NOSYS: 52,
-  NOTDIR: 54, NOTEMPTY: 55, NOTSUP: 58, PERM: 63, SPIPE: 70,
+  NOTDIR: 54, NOTEMPTY: 55, NOTSUP: 58, PERM: 63, SPIPE: 70, NOTCAPABLE: 76,
 };
 const FILETYPE = { UNKNOWN: 0, CHARACTER_DEVICE: 2, DIRECTORY: 3, REGULAR_FILE: 4 };
 const OFLAGS = { CREAT: 1, DIRECTORY: 2, EXCL: 4, TRUNC: 8 };
@@ -114,7 +114,10 @@ class OpenFile {
   }
 }
 class OpenDir {
-  constructor(node, path, preopen) { this.node = node; this.path = path; this.preopen = preopen; }
+  /** `root`: the preopened directory it is in, which paths relative to it cannot leave. */
+  constructor(node, path, preopen, root = preopen) {
+    this.node = node; this.path = path; this.preopen = preopen; this.root = root;
+  }
 }
 class Stdio {
   constructor(which) { this.which = which; }
@@ -730,15 +733,21 @@ export class Kernel {
     if (!(f instanceof OpenDir)) return E.BADF;
     const [buf, len] = [u32(a[1]), u32(a[2])];
     const cookie = Number(a[3]);
-    const names = [[".", f.node], ["..", f.node], ...f.node.entries];
+    // An entry's cookie (where reading resumes after it) is 1 for ".", 2 for "..", and 2 more
+    // than its number (fs.js), which removing other entries does not change.
+    function* listing() {
+      if (cookie < 1) yield [".", f.node, 1];
+      if (cookie < 2) yield ["..", f.node, 2];
+      for (const [name, node, seq] of f.node.entries.after(Math.max(cookie - 2, 0))) yield [name, node, seq + 2];
+    }
     const v = p.view();
     let used = 0;
-    for (let i = cookie; i < names.length && used < len; i++) {
-      const [name, node] = names[i];
+    for (const [name, node, next] of listing()) {
+      if (used >= len) break;
       const nb = encoder.encode(name);
       const ent = new Uint8Array(24 + nb.length);
       const dv = new DataView(ent.buffer);
-      dv.setBigUint64(0, BigInt(i + 1), true);
+      dv.setBigUint64(0, BigInt(next), true);
       dv.setBigUint64(8, node.ino, true);
       dv.setUint32(16, nb.length, true);
       dv.setUint8(20, node instanceof Dir ? FILETYPE.DIRECTORY : FILETYPE.REGULAR_FILE);
@@ -753,16 +762,21 @@ export class Kernel {
 
   // ---- Paths ---------------------------------------------------------------
 
-  /** The absolute path of `path` relative to directory descriptor `fd`. */
+  /** The absolute path of `path` relative to directory descriptor `fd`, or an error number: BADF
+   *  if `fd` is not a directory, NOTCAPABLE if the path leads out of the preopened directory `fd`
+   *  is in. */
   resolve(p, fd, ptr, len) {
     const d = p.fds.get(fd);
-    if (!(d instanceof OpenDir)) return null;
-    return join(d.path, p.string(ptr, len));
+    if (!(d instanceof OpenDir)) return E.BADF;
+    const path = join(d.path, p.string(ptr, len));
+    const parts = components(path);
+    if (components(d.root).some((c, i) => parts[i] !== c)) return E.NOTCAPABLE;
+    return path;
   }
 
   sys_path_open(p, a) {
     const path = this.resolve(p, u32(a[0]), u32(a[2]), u32(a[3]));
-    if (path === null) return E.BADF;
+    if (typeof path === "number") return path;
     const oflags = u32(a[4]), fdflags = u32(a[7]);
     let node = this.fs.lookup(path);
     // A lazy file is loaded when first opened; then open it again.
@@ -775,6 +789,7 @@ export class Kernel {
     if (node && oflags & OFLAGS.EXCL && oflags & OFLAGS.CREAT) return E.EXIST;
     if (!node) {
       if (!(oflags & OFLAGS.CREAT)) return E.NOENT;
+      if (oflags & OFLAGS.DIRECTORY) return E.INVAL; // as Linux: it would not be a directory
       const parent = this.fs.parent(path);
       if (!parent) return E.NOENT;
       node = new File();
@@ -783,7 +798,7 @@ export class Kernel {
     if (oflags & OFLAGS.DIRECTORY && !(node instanceof Dir)) return E.NOTDIR;
     let fd;
     if (node instanceof Dir) {
-      fd = p.newFd(new OpenDir(node, path, null));
+      fd = p.newFd(new OpenDir(node, path, null, p.fds.get(u32(a[0])).root));
     } else {
       if (oflags & OFLAGS.TRUNC) node.resize(0);
       fd = p.newFd(new OpenFile(node, path, !!(fdflags & FDFLAGS_APPEND)));
@@ -793,14 +808,14 @@ export class Kernel {
   }
   sys_path_filestat_get(p, a) {
     const path = this.resolve(p, u32(a[0]), u32(a[2]), u32(a[3]));
-    if (path === null) return E.BADF;
+    if (typeof path === "number") return path;
     const node = this.fs.lookup(path);
     if (!node) return E.NOENT;
     return this.filestat(p, node, u32(a[4]));
   }
   sys_path_create_directory(p, a) {
     const path = this.resolve(p, u32(a[0]), u32(a[1]), u32(a[2]));
-    if (path === null) return E.BADF;
+    if (typeof path === "number") return path;
     if (this.fs.lookup(path)) return E.EXIST;
     const parent = this.fs.parent(path);
     if (!parent) return E.NOENT;
@@ -809,7 +824,7 @@ export class Kernel {
   }
   sys_path_remove_directory(p, a) {
     const path = this.resolve(p, u32(a[0]), u32(a[1]), u32(a[2]));
-    if (path === null) return E.BADF;
+    if (typeof path === "number") return path;
     const node = this.fs.lookup(path);
     if (!node) return E.NOENT;
     if (!(node instanceof Dir)) return E.NOTDIR;
@@ -819,7 +834,7 @@ export class Kernel {
   }
   sys_path_unlink_file(p, a) {
     const path = this.resolve(p, u32(a[0]), u32(a[1]), u32(a[2]));
-    if (path === null) return E.BADF;
+    if (typeof path === "number") return path;
     const node = this.fs.lookup(path);
     if (!node) return E.NOENT;
     if (node instanceof Dir) return E.ISDIR;
@@ -829,11 +844,22 @@ export class Kernel {
   sys_path_rename(p, a) {
     const from = this.resolve(p, u32(a[0]), u32(a[1]), u32(a[2]));
     const to = this.resolve(p, u32(a[3]), u32(a[4]), u32(a[5]));
-    if (from === null || to === null) return E.BADF;
+    if (typeof from === "number") return from;
+    if (typeof to === "number") return to;
     const node = this.fs.lookup(from);
     if (!node) return E.NOENT;
     const parent = this.fs.parent(to);
     if (!parent) return E.NOENT;
+    const target = parent[0].entries.get(parent[1]);
+    if (target === node) return E.SUCCESS;
+    if (node instanceof Dir) {
+      const [f, t] = [components(from), components(to)];
+      if (t.length > f.length && f.every((c, i) => t[i] === c)) return E.INVAL; // into itself
+      if (target && !(target instanceof Dir)) return E.NOTDIR;
+      if (target?.entries.size) return E.NOTEMPTY;
+    } else if (target instanceof Dir) {
+      return E.ISDIR;
+    }
     this.fs.remove(from);
     parent[0].entries.set(parent[1], node);
     return E.SUCCESS;

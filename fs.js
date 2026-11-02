@@ -111,11 +111,43 @@ export class File {
   }
 }
 
+/** A directory's entries: a Map that numbers each name as it is added. The numbers are the
+ *  positions `fd_readdir` resumes from, which stay put when other names are removed (as programs
+ *  do while reading a directory to delete it), unlike indices. They follow the Map's order, since
+ *  setting a name it has keeps both its place and its number. */
+class Entries extends Map {
+  seqs = new Map();
+  lastSeq = 0;
+
+  set(name, node) {
+    if (!this.has(name)) this.seqs.set(name, ++this.lastSeq);
+    return super.set(name, node);
+  }
+
+  delete(name) {
+    this.seqs.delete(name);
+    return super.delete(name);
+  }
+
+  clear() {
+    this.seqs.clear();
+    super.clear();
+  }
+
+  /** The entries numbered above `seq`, with their numbers, in order. */
+  *after(seq) {
+    for (const [name, node] of this) {
+      const n = this.seqs.get(name);
+      if (n > seq) yield [name, node, n];
+    }
+  }
+}
+
 export class Dir {
   constructor() {
     this.ino = nextIno++;
     /** @type {Map<string, File | Dir>} */
-    this.entries = new Map();
+    this.entries = new Entries();
     this.mtime = BigInt(Date.now()) * 1000000n;
   }
 }
