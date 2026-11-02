@@ -7,7 +7,8 @@
 //       thread's system call channel and the kernel's doorbell.
 //   { type: "start", tid, startArg }
 //       Run: with no `startArg` this is the main thread and runs `_start`;
-//       otherwise it runs `wasi_thread_start`.
+//       otherwise it runs `wasi_thread_start`. After a thread exits, the
+//       kernel may start another of the process's threads on the instance.
 // And when the kernel is done with the thread:
 //   { type: "close" }
 //       Answer "closing" and close: the kernel terminates the worker only

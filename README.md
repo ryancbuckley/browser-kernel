@@ -5,7 +5,8 @@ A small [WASI preview1](https://github.com/WebAssembly/WASI/blob/main/legacy/pre
 `wasm32-wasip1-threads` programs in the browser and under Node. Plain ES modules, no
 dependencies and no build step.
 
-Every wasm thread runs in its own worker on its process's shared memory. System calls are
+Every wasm thread runs in its own worker on its process's shared memory (an exited thread's worker
+and instance run the process's next thread). System calls are
 synchronous RPCs: a thread writes the call to a small `SharedArrayBuffer` channel, rings the
 kernel's doorbell and blocks in `Atomics.wait`; the kernel (which never blocks) handles it and
 posts the result. The kernel owns an in-memory filesystem (`MemFS`), the processes and their file

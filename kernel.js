@@ -423,7 +423,14 @@ export class Kernel {
     } else if (m.type === "thread-exit") {
       this.threads.delete(t.tid);
       t.proc.threads.delete(t);
-      this.retire(t);
+      // Its instance can run the process's next thread (`wasi_thread_start` sets up the thread's
+      // stack and TLS from its argument): starting one costs a worker and an instantiation, and
+      // some programs (Lean's language server) start thousands of short-lived threads.
+      if (t.proc.exitCode === null && t.proc.spares.length < MAX_SPARE_THREADS) {
+        t.proc.spares.push(t);
+      } else {
+        this.retire(t);
+      }
     } else if (m.type === "trap") {
       // A Rust panic with panic=abort ends in `unreachable`, after printing
       // the panic message; the wasm stack is only interesting when tracing.

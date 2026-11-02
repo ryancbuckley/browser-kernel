@@ -20,6 +20,7 @@ const work = mkdtempSync(join(tmpdir(), "wasi-kernel-test-"));
 const tests = [
   { name: "basic", args: ["one", "two words"], code: 7 },
   { name: "pipe" },
+  { name: "churn" },
 ];
 
 let failures = 0;
@@ -106,6 +107,26 @@ for (const t of tests) {
     console.log(`FAIL evictable files: ${JSON.stringify(results)}`);
   } else {
     console.log("ok   evictable files");
+  }
+}
+// Short-lived threads, one after another: an exited thread's instance runs the process's next
+// thread, rather than each needing a new worker and instantiation.
+{
+  const { Kernel } = await import("../kernel.js");
+  const { createNodeWorker, loadProgram } = await import("../node-host.js");
+  let workers = 0;
+  const kernel = new Kernel({ createWorker: () => (workers++, createNodeWorker()) });
+  let out = "";
+  const proc = kernel.spawn(loadProgram(join(work, "churn.wasm")), {
+    args: ["churn"],
+    stdout: (b) => (out += new TextDecoder().decode(b)),
+  });
+  const code = await proc.exited;
+  if (code !== 0 || workers > 4) {
+    failures++;
+    console.log(`FAIL thread reuse (exit ${code}, ${workers} workers)\n${out}`);
+  } else {
+    console.log(`ok   thread reuse (${workers} workers for 200 threads)`);
   }
 }
 // A piped stdin: written while the program runs, which waits for it.
