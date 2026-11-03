@@ -373,7 +373,16 @@ export class Kernel {
     /** Functions for `soon` to run, and the channel it runs them through. @type {(() => void)[]} */
     this.soonQueue = [];
     this.soonChannel = new MessageChannel();
-    this.soonChannel.port1.onmessage = () => { for (const f of this.soonQueue.splice(0)) f(); };
+    this.soonChannel.port1.onmessage = () => {
+      for (const f of this.soonQueue.splice(0)) {
+        // One that throws must not drop the rest: they are already off the queue.
+        try {
+          f();
+        } catch (e) {
+          queueMicrotask(() => { throw e; });
+        }
+      }
+    };
     // Under Node, a port with a listener would keep the process running.
     /** @type {{ unref?: () => void }} */ (/** @type {unknown} */ (this.soonChannel.port1)).unref?.();
     /** For each module: the most threads a process of it has started. @type {WeakMap<WebAssembly.Module, number>} */
@@ -577,7 +586,7 @@ export class Kernel {
     const failed = t.failed;
     if (failed) {
       // Its worker failed while the thread was prepared.
-      setTimeout(() => this.onThreadMessage(t, failed), 0);
+      this.soon(() => this.onThreadMessage(t, failed));
     } else {
       t.worker.postMessage({ type: "start", tid: t.tid, startArg });
     }
@@ -656,7 +665,7 @@ export class Kernel {
     proc.spares = [];
     this.threadsUsed.set(proc.module, Math.max(this.threadsUsed.get(proc.module) ?? 0, proc.started));
     // The next process of a kept-warm program, prepared while nothing runs.
-    if (this.keptWarm.has(proc.module)) setTimeout(() => this.warmUp(proc.module), 0);
+    if (this.keptWarm.has(proc.module)) this.soon(() => this.warmUp(proc.module));
     proc.resolveExit(code);
   }
 
