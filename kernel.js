@@ -653,21 +653,24 @@ export class Kernel {
     this.syscalls++;
     const name = SYSCALLS[t.ctl[1]];
     const handler = /** @type {Record<string, SysCall | undefined>} */ (/** @type {unknown} */ (this))[`sys_${name}`];
-    let r;
-    try {
-      r = handler ? handler.call(this, t.proc, t.args) : E.NOSYS;
-    } catch (e) {
+    const finish = (/** @type {number | undefined} */ v) => {
+      if (this.trace) {
+        const shown = Array.from(t.args.slice(0, 6), String).join(", ");
+        this.trace(`[${t.proc.pid}:${t.tid}] ${name}(${shown}) = ${v}`);
+      }
+      if (v !== undefined) this.reply(t, v);
+    };
+    const fail = (/** @type {unknown} */ e) => {
       t.proc.onStderr(encoder.encode(`kernel: ${name} failed: ${e}\n${e instanceof Error ? e.stack : ""}\n`));
-      r = E.IO;
+      finish(E.IO);
+    };
+    try {
+      const r = handler ? handler.call(this, t.proc, t.args) : E.NOSYS;
+      if (r instanceof Promise) r.then(finish, fail);
+      else finish(r);
+    } catch (e) {
+      fail(e);
     }
-    const trace = this.trace;
-    if (trace) {
-      const shown = Array.from(t.args.slice(0, 6), String).join(", ");
-      const log = (/** @type {number | undefined} */ v) => trace(`[${t.proc.pid}:${t.tid}] ${name}(${shown}) = ${v}`);
-      if (r instanceof Promise) r.then(log); else log(r);
-    }
-    if (r instanceof Promise) r.then((v) => this.reply(t, v));
-    else if (r !== undefined) this.reply(t, r);
   }
 
   /** @param {RunningThread} t @param {number} value */

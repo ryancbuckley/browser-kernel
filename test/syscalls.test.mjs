@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { E, Kernel, Process, importedMemory } from "../kernel.js";
+import { CHANNEL_BYTES, E, Kernel, MAX_ARGS, Process, SYSCALLS, importedMemory } from "../kernel.js";
 import { File } from "../fs.js";
 
 const O = { CREAT: 1, DIRECTORY: 2, EXCL: 4, TRUNC: 8 };
@@ -550,6 +550,23 @@ test("importedMemory parses memory limits and handles truncated prefixes", () =>
 });
 
 // ---- Regressions: what a process leaves behind, and failures that went unanswered -------
+
+test("a system call that fails after waiting is answered with EIO, not left unanswered", async () => {
+  // fd_read of a piped stdin with its iovecs outside the memory: it waits for input, then throws
+  // reading them. Its thread must get an answer, or it blocks in Atomics.wait forever.
+  const h = setup({ stdin: "pipe" });
+  const buffer = new SharedArrayBuffer(CHANNEL_BYTES);
+  const t = { tid: 1, proc: h.proc, ctl: new Int32Array(buffer, 0, 4), args: new BigInt64Array(buffer, 16, MAX_ARGS) };
+  h.kernel.threads.set(1, t);
+  [0, 0x7fff_fff0, 1, h.alloc(4)].forEach((x, i) => (t.args[i] = BigInt(x)));
+  t.ctl[1] = SYSCALLS.indexOf("fd_read");
+  t.ctl[0] = 3; // BUSY: taken by the kernel's loop
+  h.kernel.dispatch(t);
+  h.proc.writeStdin(encoder.encode("x"));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(Atomics.load(t.ctl, 0), 2, "answered (DONE)");
+  assert.equal(t.ctl[2], E.IO);
+});
 
 test("rename onto the root is refused, and adds no nameless entry", async () => {
   const h = setup();
