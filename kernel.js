@@ -1017,14 +1017,18 @@ export class Kernel {
     if (typeof path === "number") return path;
     const oflags = u32(a[4]), fdflags = u32(a[7]);
     let node = this.fs.lookup(path);
+    if (node && oflags & OFLAGS.EXCL && oflags & OFLAGS.CREAT) return E.EXIST;
+    if (node && oflags & OFLAGS.DIRECTORY && !(node instanceof Dir)) return E.NOTDIR;
     // A lazy file is loaded when first opened; then open it again.
     if (node instanceof File && node.pending) {
-      return node.load().then(() => /** @type {number | Promise<number>} */ (this.sys_path_open(p, a)), (/** @type {unknown} */ e) => {
-        p.onStderr(encoder.encode(`kernel: loading ${path} failed: ${e}\n`));
-        return E.IO;
-      });
+      return node.load().then(
+        () => (p.exitCode === null ? /** @type {number | Promise<number>} */ (this.sys_path_open(p, a)) : E.IO),
+        (/** @type {unknown} */ e) => {
+          if (p.exitCode === null) p.onStderr(encoder.encode(`kernel: loading ${path} failed: ${e}\n`));
+          return E.IO;
+        },
+      );
     }
-    if (node && oflags & OFLAGS.EXCL && oflags & OFLAGS.CREAT) return E.EXIST;
     if (!node) {
       if (!(oflags & OFLAGS.CREAT)) return E.NOENT;
       if (oflags & OFLAGS.DIRECTORY) return E.INVAL; // as Linux: it would not be a directory
@@ -1033,7 +1037,6 @@ export class Kernel {
       node = new File();
       parent[0].entries.set(parent[1], node);
     }
-    if (oflags & OFLAGS.DIRECTORY && !(node instanceof Dir)) return E.NOTDIR;
     let fd;
     if (node instanceof Dir) {
       const dir = /** @type {OpenDir} */ (p.fds.get(u32(a[0]))); // as `resolve` found

@@ -393,11 +393,13 @@ test("the preopens: their names, and nothing else is one", async () => {
 
 // ---- Lazy files ------------------------------------------------------------------
 
-test("a lazy file loads when first opened, once, and stat does not load it", async () => {
+test("a lazy file loads when first opened, once, and stat or failed flags do not load it", async () => {
   const h = setup();
   let loads = 0;
   h.kernel.fs.root.entries.set("lazy", File.lazy(async () => (loads++, encoder.encode("abc")), 3));
   assert.equal(h.stat("/lazy").size, 3);
+  assert.equal((await h.open("/lazy", { oflags: O.CREAT | O.EXCL })).errno, E.EXIST);
+  assert.equal((await h.open("/lazy", { oflags: O.DIRECTORY })).errno, E.NOTDIR);
   assert.equal(loads, 0);
   const [a, b] = await Promise.all([h.open("/lazy"), h.open("/lazy")]);
   assert.equal(loads, 1);
@@ -597,6 +599,20 @@ test("a read waiting on a piped stdin ends when its process exits", async () => 
   const r = await Promise.race([reading.then(() => "ended"), new Promise((res) => setTimeout(() => res("still waiting"), 200))]);
   assert.equal(r, "ended");
   assert.equal(h.proc.stdinWaiters.length, 0);
+});
+
+test("a lazy file that finishes loading after its process exited is not opened", async () => {
+  const h = setup();
+  h.proc.module = {};
+  let finish;
+  const file = File.lazy(() => new Promise((r) => (finish = r)), 3);
+  h.kernel.fs.root.entries.set("slow", file);
+  const opening = h.open("/slow");
+  await new Promise((r) => setTimeout(r, 10));
+  h.kernel.exit(h.proc, 0);
+  finish(encoder.encode("abc"));
+  assert.equal((await opening).errno, E.IO);
+  assert.equal(file.opens, 0);
 });
 
 test("rename onto the root is refused, and adds no nameless entry", async () => {
