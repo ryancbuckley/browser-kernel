@@ -248,8 +248,8 @@ function tryAllocateMemory(limits, maxPages) {
 export class OutOfMemoryError extends Error {
   constructor() {
     super("Out of memory: the browser refused to give this page more WebAssembly memory. " +
-      "The compiler and each program reserve memory up front (up to 1 GB for the compiler), " +
-      "and some browsers allow less than others. Reloading the page frees it.");
+      "Each process reserves its memory's maximum size up front, and some browsers allow less " +
+      "than others. Reloading the page frees it.");
     this.name = "OutOfMemoryError";
   }
 }
