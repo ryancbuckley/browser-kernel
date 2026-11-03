@@ -245,16 +245,22 @@ for (const t of tests) {
   const cases = [
     // the second worker (the first thread's) does not load
     { name: "fails to load", program: "exit", args: ["thread-exit"], worker: (n) => createNodeWorker(n === 2 ? broken : undefined), stderr: /no such worker/ },
-    // the second worker dies after running its first thread, while kept for the next
+    // the second worker says it failed after running its first thread, while kept for the next;
+    // it is in fact still running, and must still be ended (closed or terminated)
     {
-      name: "dies while kept", program: "churn", args: [], stderr: /died/,
-      worker: (n) => {
+      name: "dies while kept", program: "churn", args: [], stderr: /died/, mustEnd: 2,
+      worker: (n, ended) => {
         const w = createNodeWorker();
         if (n !== 2) return w;
-        return { ...w, onMessage: (f) => w.onMessage((m) => {
-          f(m);
-          if (m.type === "thread-exit") f({ type: "failed", message: "died" });
-        }) };
+        return {
+          ...w,
+          onMessage: (f) => w.onMessage((m) => {
+            if (m.type === "closing") ended.add(n);
+            f(m);
+            if (m.type === "thread-exit") f({ type: "failed", message: "died" });
+          }),
+          terminate: () => { ended.add(n); w.terminate(); },
+        };
       },
     },
     // the pool's idle worker fails before any thread is prepared on it (so before the kernel
@@ -263,7 +269,8 @@ for (const t of tests) {
   ];
   for (const c of cases) {
     let n = 0;
-    const kernel = new Kernel({ createWorker: () => c.worker(++n), retireTimeout: 200, pool: c.pool ?? 0 });
+    const ended = new Set();
+    const kernel = new Kernel({ createWorker: () => c.worker(++n, ended), retireTimeout: 200, pool: c.pool ?? 0 });
     if (c.delay) await new Promise((r) => setTimeout(r, c.delay));
     let err = "";
     const proc = kernel.spawn(loadProgram(join(work, `${c.program}.wasm`)), {
@@ -271,10 +278,14 @@ for (const t of tests) {
       stderr: (b) => (err += new TextDecoder().decode(b)),
     });
     const code = await Promise.race([proc.exited, new Promise((r) => setTimeout(() => r("hung"), 5000))]);
+    if (c.mustEnd) await new Promise((r) => setTimeout(r, 500));
     if (code !== 134 || !c.stderr.test(err)) {
       failures++;
       console.log(`FAIL worker ${c.name}: exit ${code}, stderr ${JSON.stringify(err)}`);
       if (code === "hung") kernel.kill(proc);
+    } else if (c.mustEnd && !ended.has(c.mustEnd)) {
+      failures++;
+      console.log(`FAIL worker ${c.name}: the failed worker was neither closed nor terminated`);
     } else {
       console.log(`ok   worker ${c.name}`);
     }

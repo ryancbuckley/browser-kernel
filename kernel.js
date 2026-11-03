@@ -412,6 +412,12 @@ export class Kernel {
    *  (thread-worker.js).
    *  @param {Thread} t */
   retire(t) {
+    // A failed worker may have stopped, or may still run (after an uncaught error, or a message it
+    // could not read): end it either way.
+    if (t.failed) {
+      t.worker.terminate();
+      return;
+    }
     if (this.retireTimeout !== null) t.retired = setTimeout(() => t.worker.terminate(), this.retireTimeout);
     t.worker.postMessage({ type: "close" });
   }
@@ -614,6 +620,7 @@ export class Kernel {
       this.exit(t.proc, 134);
     } else if (m.type === "failed") {
       // Without it, the process would wait for this thread forever.
+      t.failed = m;
       t.proc.onStderr(encoder.encode(`error: a thread's worker stopped: ${m.message}\n`));
       this.exit(t.proc, 134);
     }
