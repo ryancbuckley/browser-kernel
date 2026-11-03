@@ -359,6 +359,12 @@ export class Kernel {
     /** @type {ThreadWorker[]} */
     this.idleWorkers = [];
     this.refilling = false;
+    /** Functions for `soon` to run, and the channel it runs them through. @type {(() => void)[]} */
+    this.soonQueue = [];
+    this.soonChannel = new MessageChannel();
+    this.soonChannel.port1.onmessage = () => { for (const f of this.soonQueue.splice(0)) f(); };
+    // Under Node, a port with a listener would keep the process running.
+    /** @type {{ unref?: () => void }} */ (/** @type {unknown} */ (this.soonChannel.port1)).unref?.();
     /** For each module: the most threads a process of it has started. @type {WeakMap<WebAssembly.Module, number>} */
     this.threadsUsed = new WeakMap();
     /** Programs to keep a process prepared for (`keepWarm`), by module. @type {Map<WebAssembly.Module, Program>} */
@@ -399,13 +405,25 @@ export class Kernel {
     t.worker.postMessage({ type: "close" });
   }
 
+  /** Make idle workers, up to `poolSize`, after the current task. Not in a timer: Chrome never
+   *  shuts down a worker (here, the one running the kernel) after its page is left if, while one
+   *  of its timers was pending, it created a nested worker in a timer task and first sent it a
+   *  message in a later task, as a pooled worker is. It then keeps everything it references,
+   *  processes' memories included, for as long as the browser's process for the page lives. */
   refillPool() {
     if (this.refilling || this.idleWorkers.length >= this.poolSize) return;
     this.refilling = true;
-    setTimeout(() => {
+    this.soon(() => {
       this.refilling = false;
       while (this.idleWorkers.length < this.poolSize) this.idleWorkers.push(this.createWorker());
-    }, 0);
+    });
+  }
+
+  /** Run `f` after the current task, in a task of its own, as `setTimeout(f, 0)` would, but a
+   *  message task, not a timer one (see `refillPool`). @param {() => void} f */
+  soon(f) {
+    this.soonQueue.push(f);
+    this.soonChannel.port2.postMessage(null);
   }
 
   /** A thread of `module` instantiated on `memory`, waiting for `startThread`.
