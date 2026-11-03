@@ -76,9 +76,3 @@ Run `npm install` first to install TypeScript and Node type definitions.
   tests compile the C programs in `test/` using [wasi-sdk](https://github.com/WebAssembly/wasi-sdk)
   (set `WASI_SDK` to its installation path) and exercise threads, piped stdin, lazy files, and
   worker cleanup across normal exits, traps, and kills.
-
-Originally extracted from `browser_rust_playground` (`web/kernel/`, commit `399defd`).
-
-## License
-
-Apache-2.0. See `LICENSE`.
