@@ -1028,10 +1028,9 @@ export class Kernel {
   resolve(p, fd, ptr, len) {
     const d = p.fds.get(fd);
     if (!(d instanceof OpenDir)) return E.BADF;
-    const path = join(d.path, p.string(ptr, len));
-    const parts = components(path);
+    const parts = components(join(d.path, p.string(ptr, len)));
     if (components(d.root).some((c, i) => parts[i] !== c)) return E.NOTCAPABLE;
-    return path;
+    return "/" + parts.join("/");
   }
 
   /** @type {SysCall} */
