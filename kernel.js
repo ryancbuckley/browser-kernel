@@ -791,20 +791,16 @@ export class Kernel {
     }
     const v = p.view();
     let total = 0;
-    const chunks = [];
+    let pos = f instanceof OpenFile ? (at ?? (f.append ? f.node.size : f.pos)) : 0;
     for (let i = 0; i < n; i++) {
       const ptr = v.getUint32(iovs + 8 * i, true), len = v.getUint32(iovs + 8 * i + 4, true);
-      chunks.push(p.bytes(ptr, len).slice());
+      if (len === 0) continue;
+      const bytes = p.bytes(ptr, len);
+      if (f instanceof Stdio) (f.which === 2 ? p.onStderr : p.onStdout)(bytes.slice());
+      else { f.node.write(pos, bytes); pos += len; }
       total += len;
     }
-    if (f instanceof Stdio) {
-      const out = f.which === 2 ? p.onStderr : p.onStdout;
-      for (const c of chunks) if (c.length) out(c);
-    } else {
-      let pos = at ?? (f.append ? f.node.size : f.pos);
-      for (const c of chunks) { f.node.write(pos, c); pos += c.length; }
-      if (at === null) f.pos = pos;
-    }
+    if (f instanceof OpenFile && at === null) f.pos = pos;
     v.setUint32(nwrittenPtr, total, true);
     return E.SUCCESS;
   }
