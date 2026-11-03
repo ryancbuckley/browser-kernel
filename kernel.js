@@ -228,6 +228,22 @@ function newMemory(limits, maxPages) {
   });
 }
 
+/** Try allocating a shared WebAssembly.Memory using `maxPages` (a single limit or
+ *  a list of fallback limits in descending order). Returns null if all attempts fail
+ *  with RangeError.
+ *  @param {MemoryLimits} limits @param {number | number[]} [maxPages] */
+function tryAllocateMemory(limits, maxPages) {
+  const candidates = Array.isArray(maxPages) ? maxPages : [maxPages];
+  for (const max of candidates) {
+    try {
+      return newMemory(limits, max);
+    } catch (e) {
+      if (!(e instanceof RangeError)) throw e;
+    }
+  }
+  return null;
+}
+
 /** The browser would not allocate a process's memory. */
 export class OutOfMemoryError extends Error {
   constructor() {
@@ -489,6 +505,8 @@ export class Kernel {
     if (!program || this.warm.has(module)) return;
     let memory;
     try {
+      // Only the largest limit: when even that is refused, memory is scarce, and a smaller memory
+      // held for a process that may never run would be taken from the processes that do.
       const max = Array.isArray(program.maxPages) ? program.maxPages[0] : program.maxPages;
       memory = newMemory(processMemory(program), max);
     } catch {
@@ -515,21 +533,10 @@ export class Kernel {
    *  failure, free the prepared processes' memories and try once more.
    *  @param {MemoryLimits} limits @param {number | number[]} [maxPages] */
   allocateMemory(limits, maxPages) {
-    const limitsToTry = Array.isArray(maxPages) ? maxPages : [maxPages];
-    const attempt = () => {
-      for (const max of limitsToTry) {
-        try {
-          return newMemory(limits, max);
-        } catch (e) {
-          if (!(e instanceof RangeError)) throw e;
-        }
-      }
-      return null;
-    };
-    let memory = attempt();
+    let memory = tryAllocateMemory(limits, maxPages);
     if (!memory) {
       this.coolDown();
-      memory = attempt();
+      memory = tryAllocateMemory(limits, maxPages);
     }
     if (!memory) throw new OutOfMemoryError();
     return memory;
