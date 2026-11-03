@@ -3,6 +3,7 @@
 // Paths are absolute and '/'-separated. The kernel resolves WASI paths
 // (relative to a preopened directory) to absolute ones before calling in.
 
+const encoder = new TextEncoder();
 let nextIno = 1n;
 
 /** @param {Uint8Array<ArrayBuffer>} packed */
@@ -207,15 +208,10 @@ export class MemFS {
    *  @param {string} path @returns {[Dir, string] | null} */
   parent(path) {
     const parts = components(path);
-    const name = parts.pop() ?? "";
-    /** @type {File | Dir | null | undefined} */
-    let node = this.root;
-    for (const p of parts) {
-      node = node instanceof Dir ? node.entries.get(p) : null;
-      if (!node) return null;
-    }
-    if (!(node instanceof Dir)) return null;
-    return [node, name];
+    const name = parts.pop();
+    if (!name) return null;
+    const dir = this.lookup("/" + parts.join("/"));
+    return dir instanceof Dir ? [dir, name] : null;
   }
 
   /** The directory at `path`, made with any directories above it that are missing.
@@ -237,9 +233,10 @@ export class MemFS {
   /** @param {string} path @param {Uint8Array | string} bytes */
   writeFile(path, bytes) {
     const parts = components(path);
-    const name = parts.pop() ?? "";
+    const name = parts.pop();
+    if (!name) throw new Error(`${path}: not a file path`);
     const dir = this.mkdirp("/" + parts.join("/"));
-    const file = new File(bytes instanceof Uint8Array ? bytes : new TextEncoder().encode(bytes));
+    const file = new File(bytes instanceof Uint8Array ? bytes : encoder.encode(bytes));
     dir.entries.set(name, file);
     return file;
   }

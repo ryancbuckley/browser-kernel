@@ -1050,6 +1050,7 @@ export class Kernel {
     const node = this.fs.lookup(path);
     if (!node) return E.NOENT;
     if (!(node instanceof Dir)) return E.NOTDIR;
+    if (node === this.fs.root) return E.ACCES;
     if (node.entries.size) return E.NOTEMPTY;
     this.fs.remove(path);
     return E.SUCCESS;

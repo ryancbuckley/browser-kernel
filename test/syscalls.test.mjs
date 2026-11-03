@@ -221,6 +221,7 @@ test("directories: create, remove and their errors", async () => {
   assert.equal(h.rmdir("/d/sub"), E.SUCCESS);
   assert.equal(h.rmdir("/d"), E.SUCCESS);
   assert.equal(h.stat("/d").errno, E.NOENT);
+  assert.equal(h.rmdir("/"), E.ACCES);
 });
 
 test("paths relative to a directory descriptor, and . and ..", async () => {
@@ -541,4 +542,14 @@ test("importedMemory parses memory limits and handles truncated prefixes", () =>
     0x03, 0x01, 0x00,
   ]);
   assert.equal(importedMemory(noImport), null);
+});
+
+// ---- Regressions: what a process leaves behind, and failures that went unanswered -------
+
+test("rename onto the root is refused, and adds no nameless entry", async () => {
+  const h = setup();
+  assert.equal(h.mkdir("/d"), E.SUCCESS);
+  assert.notEqual(h.rename("/d", "/"), E.SUCCESS);
+  assert.ok(!h.kernel.fs.root.entries.has(""));
+  assert.equal(h.stat("/d").errno, E.SUCCESS);
 });
