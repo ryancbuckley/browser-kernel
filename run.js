@@ -20,22 +20,29 @@ const saves = [];
 /** @type {Record<string, string>} */
 const env = { RUST_BACKTRACE: process.env.RUST_BACKTRACE ?? "0" };
 while (argv[0]?.startsWith("--")) {
-  const [flag, value] = [argv.shift(), argv.shift()];
-  if (value === undefined) {
-    process.stderr.write(`run.js: ${flag} needs a value\n`);
+  const flag = argv.shift();
+  if (flag === "--") break;
+  if (flag !== "--dir" && flag !== "--program" && flag !== "--save" && flag !== "--env") {
+    process.stderr.write(`run.js: unknown option ${flag}\n`);
     process.exit(2);
   }
-  const [a, b] = value.split(/=(.*)/s);
+  const value = argv.shift();
+  const eq = value?.indexOf("=") ?? -1;
+  if (value === undefined || eq === -1) {
+    process.stderr.write(`run.js: ${flag} expects name=value\n`);
+    process.exit(2);
+  }
+  const a = value.slice(0, eq), b = value.slice(eq + 1);
   if (flag === "--dir") loadDir(kernel.fs, a, b);
   else if (flag === "--program") kernel.programs[a] = loadProgram(b);
   else if (flag === "--save") saves.push([a, b]);
   else if (flag === "--env") env[a] = b;
-  else {
-    process.stderr.write(`run.js: unknown option ${flag}\n`);
-    process.exit(2);
-  }
 }
 const [file, ...args] = argv;
+if (!file) {
+  process.stderr.write("usage: run.js [--dir host=guest]... [--program name=file.wasm]... [--env name=value]... [--save guest=host]... prog.wasm [args...]\n");
+  process.exit(2);
+}
 const proc = kernel.spawn(loadProgram(file), {
   args: [file, ...args],
   env,

@@ -33,6 +33,7 @@ export function createNodeWorker(script = new URL("./thread-worker.js", import.m
 /** Copy host directory `src` into the kernel filesystem at `dst`.
  *  @param {MemFS} fs @param {string} src @param {string} dst */
 export function loadDir(fs, src, dst) {
+  fs.mkdirp(dst);
   for (const name of readdirSync(src)) {
     const s = join(src, name);
     const d = `${dst}/${name}`;
