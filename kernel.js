@@ -275,7 +275,8 @@ export class Process {
     this.kernel = kernel;
     this.pid = pid;
     this.args = opts.args ?? ["program"];
-    this.env = Object.entries(opts.env ?? {}).map(([k, v]) => `${k}=${v}`);
+    this.envVars = opts.env ?? {};
+    this.env = Object.entries(this.envVars).map(([k, v]) => `${k}=${v}`);
     // `opts.stdin`: the bytes to read (then end of file), or "pipe" for input given later with
     // `writeStdin`, until `closeStdin`
     this.stdinPipe = opts.stdin === "pipe";
@@ -1164,7 +1165,7 @@ export class Kernel {
       while (v.getUint8(e)) e++;
       argv.push(p.string(s, e - s));
     }
-    const name = argv[0].split("/").pop() ?? "";
+    const name = argv[0]?.split("/").pop() ?? "";
     const program = this.programs[name];
     if (!program) {
       p.onStderr(encoder.encode(`kernel: no program named ${name}\n`));
@@ -1172,7 +1173,7 @@ export class Kernel {
     }
     const child = this.spawn(program, {
       args: argv,
-      env: Object.fromEntries(p.env.map((kv) => kv.split(/=(.*)/s).slice(0, 2))),
+      env: p.envVars,
       stdout: p.onStdout,
       stderr: p.onStderr,
     });

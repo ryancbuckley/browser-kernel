@@ -631,6 +631,11 @@ test("fd_filestat_set_size of a negative size is refused", async () => {
   assert.equal(h.stat("/f").size, 3);
 });
 
+test("playground.spawn with no arguments says there is no such program", () => {
+  const h = setup();
+  assert.equal(h.sys("playground_spawn", h.alloc(4), 0), -1);
+});
+
 test("a Node worker that fails before the kernel listens still reports it", async () => {
   // As a pooled worker can: created ahead, its handlers attached only when a thread is prepared.
   const w = createNodeWorker(new URL("data:text/javascript,throw new Error('no such worker')"));
