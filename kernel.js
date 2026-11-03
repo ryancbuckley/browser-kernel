@@ -278,6 +278,8 @@ export class Process {
     this.threads = new Set();
     /** Processes it started with playground.spawn, still running. @type {Set<Process>} */
     this.children = new Set();
+    /** Pending `poll_oneoff` timers to clear if the process exits early. @type {Set<ReturnType<typeof setTimeout>>} */
+    this.timers = new Set();
     /** Threads prepared (instantiated) for it, waiting to be started. @type {Thread[]} */
     this.spares = [];
     /** How many threads it has started, the main thread included. */
@@ -629,6 +631,9 @@ export class Kernel {
     proc.exitCode = code;
     for (const f of proc.fds.values()) f.close();
     proc.fds.clear();
+    for (const timer of proc.timers) clearTimeout(timer);
+    proc.timers.clear();
+    proc.closeStdin();
     // A killed compiler takes its linker with it.
     for (const child of proc.children) this.exit(child, code);
     for (const t of proc.threads) {
@@ -769,7 +774,13 @@ export class Kernel {
       return E.SUCCESS;
     };
     if (wait <= 0n) return finish();
-    return new Promise((resolve) => setTimeout(() => resolve(finish()), Number(wait / 1000000n)));
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        p.timers.delete(timer);
+        resolve(p.exitCode === null ? finish() : E.SUCCESS);
+      }, Number(wait / 1000000n));
+      p.timers.add(timer);
+    });
   }
 
   // ---- File descriptors ----------------------------------------------------
@@ -821,7 +832,7 @@ export class Kernel {
     if (f instanceof Stdio && p.stdinPipe && p.stdinPos >= p.stdin.length) {
       // block until there is input (or its end)
       return /** @type {Promise<void>} */ (new Promise((wake) => p.stdinWaiters.push(wake)))
-        .then(() => this.read(p, fd, iovs, n, nreadPtr, at));
+        .then(() => (p.exitCode === null ? this.read(p, fd, iovs, n, nreadPtr, at) : E.SUCCESS));
     }
     const v = p.view();
     let total = 0;

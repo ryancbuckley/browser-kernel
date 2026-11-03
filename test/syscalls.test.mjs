@@ -551,6 +551,16 @@ test("importedMemory parses memory limits and handles truncated prefixes", () =>
 
 // ---- Regressions: what a process leaves behind, and failures that went unanswered -------
 
+/** A relative clock subscription for poll_oneoff, `timeout` ns long, in `h`'s memory. */
+function sleepSubscription(h, timeout) {
+  const sub = h.alloc(48), ev = h.alloc(32), n = h.alloc(4);
+  const v = h.proc.view();
+  v.setUint8(sub + 8, 0); // clock
+  v.setUint32(sub + 16, 1, true); // monotonic
+  v.setBigUint64(sub + 24, timeout, true);
+  return [sub, ev, 1, n];
+}
+
 test("a system call that fails after waiting is answered with EIO, not left unanswered", async () => {
   // fd_read of a piped stdin with its iovecs outside the memory: it waits for input, then throws
   // reading them. Its thread must get an answer, or it blocks in Atomics.wait forever.
@@ -566,6 +576,27 @@ test("a system call that fails after waiting is answered with EIO, not left unan
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(Atomics.load(t.ctl, 0), 2, "answered (DONE)");
   assert.equal(t.ctl[2], E.IO);
+});
+
+test("a sleep's timer is cleared when its process exits", () => {
+  const h = setup();
+  h.proc.module = {};
+  const r = h.sys("poll_oneoff", ...sleepSubscription(h, 60_000_000_000n));
+  assert.ok(r instanceof Promise);
+  assert.equal(h.proc.timers.size, 1);
+  h.kernel.exit(h.proc, 0);
+  assert.equal(h.proc.timers.size, 0, "no timer left holding the exited process");
+});
+
+test("a read waiting on a piped stdin ends when its process exits", async () => {
+  const h = setup({ stdin: "pipe" });
+  h.proc.module = {};
+  const reading = h.read(0);
+  await new Promise((r) => setTimeout(r, 10));
+  h.kernel.exit(h.proc, 0);
+  const r = await Promise.race([reading.then(() => "ended"), new Promise((res) => setTimeout(() => res("still waiting"), 200))]);
+  assert.equal(r, "ended");
+  assert.equal(h.proc.stdinWaiters.length, 0);
 });
 
 test("rename onto the root is refused, and adds no nameless entry", async () => {
