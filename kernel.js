@@ -990,14 +990,14 @@ export class Kernel {
     if (!(f instanceof OpenDir)) return E.BADF;
     const [buf, len] = [u32(a[1]), u32(a[2])];
     const cookie = Number(a[3]);
-    // An entry's cookie (where reading resumes after it) is 1 for ".", 2 for "..", and 2 more
-    // than its number (fs.js), which removing other entries does not change.
+    // An entry's cookie (where reading resumes after it) is 1 for ".", 2 for "..", and its number
+    // (fs.js) for the others, which removing other entries does not change.
     const dir = f.node;
     /** @returns {Generator<[string, File | Dir, number]>} */
     function* listing() {
       if (cookie < 1) yield [".", dir, 1];
       if (cookie < 2) yield ["..", dir, 2];
-      for (const [name, node, seq] of dir.entries.after(Math.max(cookie - 2, 0))) yield [name, node, seq + 2];
+      yield* dir.entries.after(cookie);
     }
     const v = p.view();
     let used = 0;

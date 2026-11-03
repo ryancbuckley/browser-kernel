@@ -121,15 +121,15 @@ export class File {
   }
 }
 
-/** A directory's entries: a Map that numbers each name as it is added. The numbers are the
- *  positions `fd_readdir` resumes from, which stay put when other names are removed (as programs
- *  do while reading a directory to delete it), unlike indices. They follow the Map's order, since
- *  setting a name it has keeps both its place and its number. */
+/** Directory entry map that assigns each inserted entry a monotonically increasing
+ *  cookie (starting at 3, since 1 and 2 are reserved for "." and "..").
+ *  Using stable cookies instead of array indices ensures `fd_readdir` does not skip
+ *  entries when files are unlinked during iteration (e.g. `rm -r`). */
 /** @extends {Map<string, File | Dir>} */
 class Entries extends Map {
   /** @type {Map<string, number>} */
   seqs = new Map();
-  lastSeq = 0;
+  lastSeq = 2;
 
   /** @param {string} name @param {File | Dir} node */
   set(name, node) {
@@ -148,12 +148,12 @@ class Entries extends Map {
     super.clear();
   }
 
-  /** The entries numbered above `seq`, with their numbers, in order.
-   *  @param {number} seq @returns {Generator<[string, File | Dir, number]>} */
-  *after(seq) {
+  /** Yield `[name, node, cookie]` for all entries with a cookie greater than `cookie`.
+   *  @param {number} cookie @returns {Generator<[string, File | Dir, number]>} */
+  *after(cookie) {
     for (const [name, node] of this) {
-      const n = /** @type {number} */ (this.seqs.get(name));
-      if (n > seq) yield [name, node, n];
+      const seq = /** @type {number} */ (this.seqs.get(name));
+      if (seq > cookie) yield [name, node, seq];
     }
   }
 }
