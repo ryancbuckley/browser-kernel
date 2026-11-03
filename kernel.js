@@ -144,29 +144,37 @@ const TRUNCATED = Symbol("truncated");
 
 /** @param {Uint8Array} bytes @returns {MemoryLimits | null} */
 function importedMemoryOrThrow(bytes) {
+  if (bytes.length < 8) throw TRUNCATED;
   let p = 8;
   const leb = () => {
     let r = 0, shift = 0, b;
     do {
       if (p >= bytes.length) throw TRUNCATED;
-      b = bytes[p++]; r += (b & 0x7f) * 2 ** shift; shift += 7;
+      b = bytes[p++];
+      r += (b & 0x7f) * 2 ** shift;
+      shift += 7;
     } while (b & 0x80);
     return r;
   };
-  const name = () => { const n = leb(); const s = decoder.decode(bytes.subarray(p, p + n)); p += n; return s; };
+  const name = () => {
+    const n = leb();
+    const s = decoder.decode(bytes.subarray(p, p + n));
+    p += n;
+    return s;
+  };
   while (p < bytes.length) {
     const id = bytes[p++];
     const size = leb();
     const end = p + size;
-    if (id === 2) {
-      if (end > bytes.length) throw TRUNCATED;
+    if (end > bytes.length) throw TRUNCATED;
+    if (id === 2) { // Import section
       for (let n = leb(); n > 0; n--) {
         const mod = name(), field = name(), kind = bytes[p++];
-        if (kind === 0) leb();
-        else if (kind === 1) { p++; const f = leb(); leb(); if (f & 1) leb(); }
-        else if (kind === 3) { p++; p++; }
-        else if (kind === 4) { p++; leb(); }
-        else if (kind === 2) {
+        if (kind === 0) leb(); // function
+        else if (kind === 1) { p++; const f = leb(); leb(); if (f & 1) leb(); } // table
+        else if (kind === 3) { p += 2; } // global
+        else if (kind === 4) { p++; leb(); } // tag
+        else if (kind === 2) { // memory
           const flags = leb();
           const initial = leb();
           const maximum = flags & 1 ? leb() : undefined;
@@ -175,6 +183,7 @@ function importedMemoryOrThrow(bytes) {
       }
       return null;
     }
+    if (id > 2) return null; // Past the import section
     p = end;
   }
   return null;

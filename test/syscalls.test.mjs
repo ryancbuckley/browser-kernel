@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { E, Kernel, Process } from "../kernel.js";
+import { E, Kernel, Process, importedMemory } from "../kernel.js";
 import { File } from "../fs.js";
 
 const O = { CREAT: 1, DIRECTORY: 2, EXCL: 4, TRUNC: 8 };
@@ -516,4 +516,29 @@ test("unimplemented calls say so", () => {
   const h = setup();
   assert.equal(h.sys("sock_accept", 0, 0, 0), E.NOSYS);
   assert.equal(h.sys("proc_raise", 6), E.NOSYS);
+});
+
+test("importedMemory parses memory limits and handles truncated prefixes", () => {
+  // Minimal Wasm header (8 bytes) + Type section (id=1, size=4) + Import section (id=2, size=11: 1 import, "env"."memory", shared, min=2, max=16)
+  const wasm = new Uint8Array([
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+    0x02, 0x0f, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x02, 0x03, 0x02, 0x10,
+  ]);
+  assert.equal(importedMemory(wasm.subarray(0, 4)), undefined);
+  assert.equal(importedMemory(wasm.subarray(0, 11)), undefined);
+  assert.equal(importedMemory(wasm.subarray(0, 20)), undefined);
+  assert.deepEqual(importedMemory(wasm), {
+    module: "env",
+    name: "memory",
+    initial: 2,
+    maximum: 16,
+    shared: true,
+  });
+  // Module with Function section (id=3) and no Import section returns null
+  const noImport = new Uint8Array([
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x03, 0x01, 0x00,
+  ]);
+  assert.equal(importedMemory(noImport), null);
 });
