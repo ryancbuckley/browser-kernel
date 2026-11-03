@@ -5,17 +5,26 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /** @import { MemFS } from "./fs.js" */
-/** @import { Program, ThreadWorker } from "./kernel.js" */
+/** @import { FromThread, Program, ThreadWorker } from "./kernel.js" */
 
 /** A `createWorker` for the kernel that uses Node worker threads (running `script`, for tests).
  *  @returns {ThreadWorker} */
 export function createNodeWorker(script = new URL("./thread-worker.js", import.meta.url)) {
   const w = new Worker(script);
+  /** @type {((m: FromThread) => void) | null} */
+  let handler = null;
+  /** @type {FromThread | null} */
+  let failed = null;
+  w.on("error", (e) => {
+    failed = { type: "failed", message: e instanceof Error ? e.message : String(e) };
+    handler?.(failed);
+  });
   return {
     postMessage: (m) => w.postMessage(m),
     onMessage: (f) => {
+      handler = f;
       w.on("message", f);
-      w.on("error", (e) => f({ type: "failed", message: e instanceof Error ? e.message : String(e) }));
+      if (failed) f(failed);
     },
     terminate: () => w.terminate(),
   };

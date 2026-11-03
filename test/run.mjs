@@ -257,10 +257,14 @@ for (const t of tests) {
         }) };
       },
     },
+    // the pool's idle worker fails before any thread is prepared on it (so before the kernel
+    // attaches its handlers), and the process's main thread then gets it
+    { name: "fails while idle in the pool", program: "exit", args: ["thread-exit"], pool: 1, delay: 300, worker: (n) => createNodeWorker(n === 1 ? broken : undefined), stderr: /no such worker/ },
   ];
   for (const c of cases) {
     let n = 0;
-    const kernel = new Kernel({ createWorker: () => c.worker(++n), retireTimeout: 200 });
+    const kernel = new Kernel({ createWorker: () => c.worker(++n), retireTimeout: 200, pool: c.pool ?? 0 });
+    if (c.delay) await new Promise((r) => setTimeout(r, c.delay));
     let err = "";
     const proc = kernel.spawn(loadProgram(join(work, `${c.program}.wasm`)), {
       args: [c.program, ...c.args],

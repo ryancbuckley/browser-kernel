@@ -7,6 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CHANNEL_BYTES, E, Kernel, MAX_ARGS, Process, SYSCALLS, importedMemory } from "../kernel.js";
 import { File } from "../fs.js";
+import { createNodeWorker } from "../node-host.js";
 
 const O = { CREAT: 1, DIRECTORY: 2, EXCL: 4, TRUNC: 8 };
 const APPEND = 1;
@@ -628,4 +629,13 @@ test("fd_filestat_set_size of a negative size is refused", async () => {
   const fd = await h.create("/f", "abc");
   assert.equal(h.sys("fd_filestat_set_size", fd, -1), E.INVAL);
   assert.equal(h.stat("/f").size, 3);
+});
+
+test("a Node worker that fails before the kernel listens still reports it", async () => {
+  // As a pooled worker can: created ahead, its handlers attached only when a thread is prepared.
+  const w = createNodeWorker(new URL("data:text/javascript,throw new Error('no such worker')"));
+  await new Promise((r) => setTimeout(r, 300));
+  const m = await new Promise((r) => w.onMessage(r));
+  assert.equal(m.type, "failed");
+  assert.match(m.message, /no such worker/);
 });
