@@ -1,5 +1,5 @@
-// The kernel's system calls, called directly on a process with a plain memory: no wasm program,
-// worker or wasi-sdk needed.
+// Unit tests for kernel system calls, invoked directly against a Process and
+// plain WebAssembly.Memory without requiring worker threads or wasi-sdk.
 //
 //   node --test test/syscalls.test.mjs
 
@@ -16,8 +16,8 @@ const SEEK = { SET: 0, CUR: 1, END: 2 };
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-/** A kernel and one process with `preopens` (the first is fd 3), and helpers that make its system
- *  calls with arguments in a scratch area of its memory. */
+/** Create a kernel and a single process with `preopens` (starting at fd 3),
+ *  along with helpers that allocate arguments in a scratch region of memory. */
 function setup({ preopens = ["/"], args, env, stdin } = {}) {
   const kernel = new Kernel({ createWorker: () => { throw new Error("no threads here"); } });
   const proc = new Process(kernel, 1, { preopens, args, env, stdin });
@@ -26,7 +26,7 @@ function setup({ preopens = ["/"], args, env, stdin } = {}) {
   const alloc = (n) => { const p = top; top += (n + 7) & ~7; return p; };
   const view = () => proc.view();
   const string = (s) => { const b = encoder.encode(s); const p = alloc(b.length); proc.bytes(p, b.length).set(b); return [p, b.length]; };
-  const sys = (name, ...a) => kernel[`sys_${name}`](proc, a.map((x) => BigInt(x)), null);
+  const sys = (name, ...a) => kernel[`sys_${name}`](proc, a.map((x) => BigInt(x)));
   const out = () => alloc(8);
   const u32 = (p) => view().getUint32(p, true);
   const u64 = (p) => view().getBigUint64(p, true);
@@ -77,7 +77,7 @@ function setup({ preopens = ["/"], args, env, stdin } = {}) {
     rmdir: (path, dir = 3) => sys("path_remove_directory", dir, ...string(path)),
     unlink: (path, dir = 3) => sys("path_unlink_file", dir, ...string(path)),
     rename: (from, to, dir = 3) => sys("path_rename", dir, ...string(from), dir, ...string(to)),
-    /** One fd_readdir call: the entries that fit whole, and whether the buffer filled. */
+    /** Perform one `fd_readdir` call, returning complete entries and whether the buffer filled. */
     readdir(fd, cookie = 0, len = 4096) {
       const buf = alloc(len), o = out();
       const errno = sys("fd_readdir", fd, buf, len, cookie, o);
@@ -93,8 +93,8 @@ function setup({ preopens = ["/"], args, env, stdin } = {}) {
       }
       return { errno, entries, full: used === len };
     },
-    /** All of a directory's names, as wasi-libc's readdir reads them: a buffer at a time, resuming
-     *  from the last whole entry's cookie. `each` runs on each name as it is read. */
+    /** Read all directory entry names using `wasi-libc`'s pagination strategy
+     *  (resuming from the cookie of the last complete entry in each buffer). */
     listdir(fd, { len = 4096, each = () => {} } = {}) {
       const names = [];
       for (let cookie = 0; ;) {
@@ -116,7 +116,7 @@ test("write, read back, seek and tell", async () => {
   assert.deepEqual(h.seek(fd, 0, SEEK.CUR), { errno: E.SUCCESS, pos: 11 });
   assert.deepEqual(h.seek(fd, 6, SEEK.SET), { errno: E.SUCCESS, pos: 6 });
   assert.equal((await h.read(fd)).text, "world");
-  assert.equal((await h.read(fd)).text, "", "at the end, a read returns nothing");
+  assert.equal((await h.read(fd)).text, "", "at EOF, read returns empty string");
   assert.deepEqual(h.seek(fd, -5, SEEK.END), { errno: E.SUCCESS, pos: 6 });
   assert.equal(h.seek(fd, -1, SEEK.SET).errno, E.INVAL);
   assert.equal(h.seek(fd, 0, 3).errno, E.INVAL);
@@ -521,7 +521,7 @@ test("random_get fills more than one crypto.getRandomValues call allows", () => 
   assert.ok(tail.some((b) => b !== 0));
 });
 
-test("unimplemented calls say so", () => {
+test("unimplemented syscalls return ENOSYS", () => {
   const h = setup();
   assert.equal(h.sys("sock_accept", 0, 0, 0), E.NOSYS);
   assert.equal(h.sys("proc_raise", 6), E.NOSYS);

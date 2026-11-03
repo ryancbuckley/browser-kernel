@@ -2,8 +2,8 @@
 // Run a wasm32-wasip1-threads program under the kernel:
 //   node run.js [--dir host=guest]... [--program name=file.wasm]...
 //       [--env name=value]... [--save guest=host]... prog.wasm [args...]
-// Output goes to the console. Files live in memory; --save copies a guest
-// file out after the program exits.
+//
+// Files live in memory; --save writes a guest file to the host after exit.
 
 import process from "node:process";
 import { writeFileSync } from "node:fs";

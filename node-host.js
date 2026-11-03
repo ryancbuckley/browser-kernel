@@ -1,4 +1,4 @@
-// Running the kernel under Node, for tests and command-line use.
+// Node.js helpers for running the kernel in tests and from the CLI.
 
 import { Worker } from "node:worker_threads";
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -7,7 +7,7 @@ import { join } from "node:path";
 /** @import { MemFS } from "./fs.js" */
 /** @import { FromThread, Program, ThreadWorker } from "./kernel.js" */
 
-/** A `createWorker` for the kernel that uses Node worker threads (running `script`, for tests).
+/** Create a `ThreadWorker` backed by a Node worker thread.
  *  @returns {ThreadWorker} */
 export function createNodeWorker(script = new URL("./thread-worker.js", import.meta.url)) {
   const w = new Worker(script);
@@ -30,7 +30,7 @@ export function createNodeWorker(script = new URL("./thread-worker.js", import.m
   };
 }
 
-/** Copy host directory `src` into the kernel filesystem at `dst`.
+/** Recursively copy host directory `src` into the kernel filesystem at `dst`.
  *  @param {MemFS} fs @param {string} src @param {string} dst */
 export function loadDir(fs, src, dst) {
   fs.mkdirp(dst);
@@ -42,7 +42,8 @@ export function loadDir(fs, src, dst) {
   }
 }
 
-/** @param {string} path @returns {Program} */
+/** Read and compile a WebAssembly module from `path`.
+ *  @param {string} path @returns {Program} */
 export function loadProgram(path) {
   const bytes = new Uint8Array(readFileSync(path));
   return { bytes, module: new WebAssembly.Module(bytes) };

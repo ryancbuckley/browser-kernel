@@ -1,5 +1,4 @@
-// Echoes the lines of stdin, which the test writes a piece at a time, until its end; exits with
-// the number of lines.
+// Echoes lines from stdin as they arrive and exits with the line count.
 #include <stdio.h>
 
 int main(void) {

@@ -1,11 +1,11 @@
 {
-  // Type-checks the JavaScript (types are in JSDoc comments); nothing is built.
+  // Type-check JavaScript files via JSDoc annotations without emitting output.
   "compilerOptions": {
     "allowJs": true,
     "checkJs": true,
     "noEmit": true,
     "strict": true,
-    // Fields that are set after construction (`Process.memory`) are declared with their types.
+    // Allow declaring class fields that are initialized after construction (such as `Process.memory`).
     "strictPropertyInitialization": false,
     "target": "es2024",
     "module": "nodenext",

@@ -1,5 +1,5 @@
-// Compile the test programs with wasi-sdk and run them under the kernel (through run.js),
-// checking their output and exit codes.
+// Compile the C test programs with wasi-sdk and run them under the kernel,
+// verifying their output, exit codes, and worker cleanup.
 //
 //   WASI_SDK=/path/to/wasi-sdk node test/run.mjs
 
@@ -110,8 +110,8 @@ for (const t of tests) {
     console.log("ok   evictable files");
   }
 }
-// Short-lived threads, one after another: an exited thread's instance runs the process's next
-// thread, rather than each needing a new worker and instantiation.
+// Short-lived sequential threads: an exited thread's worker and instance are reused
+// for the next thread instead of spawning a new worker each time.
 {
   const { Kernel } = await import("../kernel.js");
   const { createNodeWorker, loadProgram } = await import("../node-host.js");
@@ -167,10 +167,10 @@ for (const t of tests) {
   }
 }
 
-// A process with threads ending: its exit code, and then every worker ends. A worker closes
-// itself when asked (thread-worker.js) unless it is running wasm, a thread waiting on a futex
-// included: then the kernel terminates it, which in Safari keeps the process's memory reserved, so
-// only the cases with such a thread may need it.
+// Process exit and worker cleanup across different thread states. Workers close themselves
+// when asked unless they are busy executing Wasm or blocked on a futex, in which case the
+// kernel force-terminates them after `retireTimeout`. Terminating a worker that runs Wasm keeps
+// its process's memory reserved in Safari, so only the cases with such a thread may terminate any.
 {
   const { Kernel } = await import("../kernel.js");
   const { loadProgram } = await import("../node-host.js");
@@ -236,8 +236,8 @@ for (const t of tests) {
   }
 }
 
-// A thread's worker failing: the process ends (rather than waiting for the thread forever), whether
-// the worker fails to load or dies while kept for the process's next thread.
+// Worker failure handling: if a worker fails to load or crashes while held in reserve,
+// the kernel terminates the process rather than waiting forever for the thread.
 {
   const { Kernel } = await import("../kernel.js");
   const { createNodeWorker, loadProgram } = await import("../node-host.js");

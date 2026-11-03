@@ -1,6 +1,5 @@
-// Many short-lived threads, one after another (as Lean's task manager starts them): each must see
-// fresh thread-local storage, whether or not the kernel runs it on an instance an earlier thread
-// used. Prints the number of threads that saw it, and exits with 0 if all did.
+// Spawns 200 short-lived threads sequentially and verifies that each thread sees
+// freshly initialized thread-local storage when the kernel reuses worker instances.
 #include <pthread.h>
 #include <stdio.h>
 

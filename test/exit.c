@@ -1,16 +1,15 @@
-// Ways a process with threads ends, by argv[1]:
-//   thread-exit   a thread calls exit(5) while the main thread waits to join it
-//   thread-trap   a thread traps while the main thread waits to join it
-//   negative      a thread calls exit(-1), which is 255
-//   race          8 threads call exit(10 + i) at once
-//   futex         the main thread exits(3) while a thread waits on a condition variable (in wasm,
-//                 not a system call)
-//   stdin         the main thread exits(4) while a thread waits to read stdin
-//   sleep         the main thread exits(6) while a thread sleeps for a minute
-//   return        main returns 0 while a thread spins
-//   spin          every thread spins, until the test kills the process
-//   spare         a thread returns and is joined (its worker is kept for the next thread), then
-//                 the main thread exits(7)
+// Exercises process exit behavior with active threads, selected by argv[1]:
+//   thread-exit   spawned thread calls exit(5) while main thread waits in pthread_join
+//   thread-trap   spawned thread traps while main thread waits in pthread_join
+//   negative      spawned thread calls exit(-1), which masks to 255
+//   race          8 threads call exit(10 + i) concurrently
+//   futex         main thread calls exit(3) while a thread waits on a condvar (in Wasm)
+//   stdin         main thread calls exit(4) while a thread blocks reading stdin
+//   sleep         main thread calls exit(6) while a thread sleeps for 60s
+//   return        main returns 0 while a thread spins in Wasm
+//   spin          all threads spin until the host kills the process
+//   spare         a thread returns and is joined (returning its worker to the spare pool),
+//                 then main calls exit(7)
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>

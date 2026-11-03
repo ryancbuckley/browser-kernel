@@ -1,19 +1,16 @@
-// A small WASI preview1 "kernel" for wasm32-wasip1-threads programs.
+// WASI preview1 and wasi-threads kernel for `wasm32-wasip1-threads` programs.
 //
-// Every wasm thread runs in its own worker on its process's shared memory.
-// System calls are synchronous RPCs to the kernel: the thread writes the call
-// number and arguments to its channel (a small SharedArrayBuffer), rings the
-// kernel's doorbell and blocks in `Atomics.wait` until the kernel posts the
-// result. Because the memory is shared, the kernel reads and writes the
-// thread's buffers directly. The kernel itself never blocks (it waits with
-// `Atomics.waitAsync`), so calls that take time, such as sleeping or running
-// a child process, complete later without holding up other threads.
+// Each WebAssembly thread runs in its own worker sharing the process's memory.
+// System calls are synchronous RPCs: the worker writes the syscall number and
+// arguments into a per-thread SharedArrayBuffer channel, increments and notifies
+// the kernel's doorbell, and blocks in `Atomics.wait`. Because process memory is
+// shared, the kernel reads and writes syscall buffers directly. The kernel loop
+// waits with `Atomics.waitAsync` and never blocks its own thread, so slow
+// syscalls (such as sleeping, waiting on stdin, or spawning a child process)
+// complete asynchronously without stalling other threads.
 //
-// The kernel owns the filesystem (an in-memory `MemFS`), the processes and
-// their file descriptors, and passes standard output to callbacks.
-//
-// Programs must import their memory (`env.memory`, shared), as
-// wasm32-wasip1-threads programs do; the kernel creates it.
+// The kernel owns an in-memory filesystem (`MemFS`) and each process's file
+// descriptor table. Programs must import a shared `env.memory`.
 
 import { Dir, File, MemFS, components, join } from "./fs.js";
 
@@ -27,7 +24,7 @@ const OFLAGS = { CREAT: 1, DIRECTORY: 2, EXCL: 4, TRUNC: 8 };
 const FDFLAGS_APPEND = 1;
 const ALL_RIGHTS = 0x1fffffffn;
 
-/** System calls, by number. `thread-spawn` and `playground.spawn` come last. */
+/** Syscall names indexed by syscall number. `thread-spawn` and `playground.spawn` come last. */
 export const SYSCALLS = [
   "args_get", "args_sizes_get", "environ_get", "environ_sizes_get",
   "clock_res_get", "clock_time_get", "fd_advise", "fd_allocate", "fd_close",
@@ -43,8 +40,8 @@ export const SYSCALLS = [
   "thread_spawn", "playground_spawn",
 ];
 
-// Channel layout: Int32 [0] state, [1] call number, [2] result;
-// BigInt64 arguments from byte 16.
+// Channel layout: Int32 [0] state, [1] syscall number, [2] result;
+// BigInt64 arguments starting at byte offset 16.
 export const CHANNEL_BYTES = 128;
 export const MAX_ARGS = 12;
 const IDLE = 0, REQUEST = 1, DONE = 2, BUSY = 3, KILLED = 4;
@@ -53,14 +50,15 @@ const decoder = new TextDecoder();
 const encoder = new TextEncoder();
 
 /**
- * The memory a module imports.
+ * Memory import descriptor parsed from a WebAssembly binary.
  * @typedef {{ module: string, name: string, initial: number, maximum?: number, shared: boolean }} MemoryLimits
  */
 
 /**
- * A program to run: its module and the memory it imports, as `limits` (from `importedMemory`) or
- * as `bytes`, the module's binary, to read them from. `maxPages` limits its memory below the
- * module's own limit, or is a list of limits to try, largest first.
+ * A runnable WebAssembly program. Must provide `module` along with either `limits`
+ * (from `importedMemory`) or the raw wasm `bytes` to parse them from. `maxPages`
+ * caps the memory below the module's declared maximum, or provides a descending list
+ * of page limits to try until allocation succeeds.
  * @typedef {object} Program
  * @property {WebAssembly.Module} module
  * @property {MemoryLimits | null} [limits]
@@ -69,9 +67,9 @@ const encoder = new TextEncoder();
  */
 
 /**
- * What a process is started with. `stdin` is the bytes to read (then end of file), or "pipe" for
- * input given later with `writeStdin`, until `closeStdin`. `preopens` are the directories it may
- * use, from fd 3 (default: "/").
+ * Options for `Kernel.spawn`. `stdin` can be a `Uint8Array` (followed by EOF) or
+ * `"pipe"` to stream input via `proc.writeStdin` and `proc.closeStdin`. `preopens`
+ * lists directory paths to preopen starting at fd 3 (defaults to `["/"]`).
  * @typedef {object} SpawnOptions
  * @property {string[]} [args]
  * @property {Record<string, string>} [env]
@@ -82,7 +80,7 @@ const encoder = new TextEncoder();
  */
 
 /**
- * Messages to a thread's worker (thread-worker.js).
+ * Messages sent from the kernel to `thread-worker.js`.
  * @typedef {{ type: "prepare", module: WebAssembly.Module, memory: WebAssembly.Memory,
  *     channel: SharedArrayBuffer, doorbell: SharedArrayBuffer, syscalls: string[] }
  *   | { type: "start", tid: number, startArg: number | null }
@@ -90,15 +88,14 @@ const encoder = new TextEncoder();
  */
 
 /**
- * Messages from a thread's worker: thread-worker.js's, and `failed`, from `createWorker`'s
- * wrapper when the worker itself fails.
+ * Messages sent from `thread-worker.js` (or `createWorker`'s error handler) to the kernel.
  * @typedef {{ type: "exit" } | { type: "thread-exit" } | { type: "closing" }
  *   | { type: "trap", message: string, stack?: string }
  *   | { type: "failed", message: string }} FromThread
  */
 
 /**
- * A worker running thread-worker.js, as `createWorker` makes it.
+ * Handle to a worker running `thread-worker.js`.
  * @typedef {object} ThreadWorker
  * @property {(m: ToThread) => void} postMessage
  * @property {(f: (m: FromThread) => void) => void} onMessage
@@ -106,29 +103,29 @@ const encoder = new TextEncoder();
  */
 
 /**
- * A thread: prepared (its module instantiated in its worker) and, once started, running in a
- * process. `ctl` and `args` are its system call channel.
+ * A thread slot with an instantiated module in a worker. `tid` and `proc` are null
+ * while the thread is prepared as a spare.
  * @typedef {object} Thread
- * @property {number | null} tid null until it is started (and again while it is a spare)
+ * @property {number | null} tid
  * @property {Process | null} proc
  * @property {Int32Array} ctl
  * @property {BigInt64Array} args
  * @property {ThreadWorker} worker
- * @property {ReturnType<typeof setTimeout>} [retired] when it will be terminated, if it has not closed
- * @property {FromThread & { type: "failed" }} [failed] its worker's failure while it was prepared
+ * @property {ReturnType<typeof setTimeout>} [retired]
+ * @property {FromThread & { type: "failed" }} [failed]
  */
 
-/** A started thread, which `Kernel.threads` holds. @typedef {Thread & { tid: number, proc: Process }} RunningThread */
+/** A currently running thread. @typedef {Thread & { tid: number, proc: Process }} RunningThread */
 
 /**
- * A system call: its result is an error number, or a promise of one for a call that completes
- * later, or undefined for one that never returns (`proc_exit`).
+ * Syscall handler returning a WASI errno, a Promise of an errno, or `undefined`
+ * if the syscall terminates the process (`proc_exit`).
  * @typedef {(p: Process, a: BigInt64Array) => number | Promise<number> | undefined} SysCall
  */
 
-/** The limits of the memory a module imports, read from its binary.
- *  `bytes` may be a prefix of the module; returns `undefined` if it is too
- *  short to tell, and `null` if the module imports no memory.
+/** Parse the memory import descriptor from a WebAssembly binary (or a prefix of one).
+ *  Returns `undefined` if `bytes` is truncated before the import section completes,
+ *  or `null` if the module does not import a memory.
  *  @param {Uint8Array} bytes
  *  @returns {MemoryLimits | null | undefined} */
 export function importedMemory(bytes) {
@@ -215,10 +212,10 @@ class Stdio {
   close() {}
 }
 
-/** A process memory: as the module declares it, but no larger than
- *  `maxPages` if given. Shared memory cannot move, so browsers reserve its
- *  maximum up front: address space only, but some have little of it. */
-/** @param {MemoryLimits} limits @param {number} [maxPages] */
+/** Allocate a shared WebAssembly.Memory for `limits`, capped at `maxPages` if given.
+ *  Because shared WebAssembly memory cannot be moved to grow, browsers reserve the
+ *  maximum address space up front.
+ *  @param {MemoryLimits} limits @param {number} [maxPages] */
 function newMemory(limits, maxPages) {
   const maximum = Math.min(limits.maximum ?? 65536, maxPages ?? 65536);
   return new WebAssembly.Memory({
@@ -244,7 +241,7 @@ function tryAllocateMemory(limits, maxPages) {
   return null;
 }
 
-/** The browser would not allocate a process's memory. */
+/** Thrown when the host cannot allocate a process's shared WebAssembly.Memory. */
 export class OutOfMemoryError extends Error {
   constructor() {
     super("Out of memory: the browser refused to give this page more WebAssembly memory. " +
@@ -254,7 +251,7 @@ export class OutOfMemoryError extends Error {
   }
 }
 
-/** The memory `program` imports, which must be what a process's is.
+/** Validate and return the shared `env.memory` import limits for `program`.
  *  @param {Program} program */
 function processMemory(program) {
   const limits = program.limits ?? (program.bytes && importedMemory(program.bytes));
@@ -265,7 +262,7 @@ function processMemory(program) {
 }
 
 export class Process {
-  /** Its memory and module, which `Kernel.spawn` sets. @type {WebAssembly.Memory} */
+  /** Process memory and compiled module, assigned by `Kernel.spawn`. @type {WebAssembly.Memory} */
   memory;
   /** @type {WebAssembly.Module} */
   module;
@@ -277,12 +274,10 @@ export class Process {
     this.args = opts.args ?? ["program"];
     this.envVars = opts.env ?? {};
     this.env = Object.entries(this.envVars).map(([k, v]) => `${k}=${v}`);
-    // `opts.stdin`: the bytes to read (then end of file), or "pipe" for input given later with
-    // `writeStdin`, until `closeStdin`
     this.stdinPipe = opts.stdin === "pipe";
     this.stdin = opts.stdin === "pipe" ? new Uint8Array(0) : opts.stdin ?? new Uint8Array(0);
     this.stdinPos = 0;
-    /** Reads of a piped stdin waiting for input. @type {(() => void)[]} */
+    /** Callbacks waking pending `fd_read` calls on piped stdin. @type {(() => void)[]} */
     this.stdinWaiters = [];
     this.onStdout = opts.stdout ?? (() => {});
     this.onStderr = opts.stderr ?? (() => {});
@@ -293,19 +288,19 @@ export class Process {
     }
     /** @type {Set<RunningThread>} */
     this.threads = new Set();
-    /** Processes it started with playground.spawn, still running. @type {Set<Process>} */
+    /** Active child processes started via `playground.spawn`. @type {Set<Process>} */
     this.children = new Set();
     /** Pending `poll_oneoff` timers to clear if the process exits early. @type {Set<ReturnType<typeof setTimeout>>} */
     this.timers = new Set();
-    /** Threads prepared (instantiated) for it, waiting to be started. @type {Thread[]} */
+    /** Pre-instantiated threads ready to run for this process. @type {Thread[]} */
     this.spares = [];
-    /** How many threads it has started, the main thread included. */
+    /** Total number of threads started by this process, including the main thread. */
     this.started = 0;
     /** @type {number | null} */
     this.exitCode = null;
     /** @type {(code: number) => void} */
     this.resolveExit = () => {};
-    /** Resolves with the exit code. @type {Promise<number>} */
+    /** Resolves to the process exit code when the process terminates. @type {Promise<number>} */
     this.exited = new Promise((resolve) => (this.resolveExit = resolve));
   }
 
@@ -315,7 +310,7 @@ export class Process {
   /** @param {number} ptr @param {number} len */
   string(ptr, len) { return decoder.decode(this.bytes(ptr, len).slice()); }
 
-  /** Give a piped stdin more input. @param {Uint8Array} bytes */
+  /** Append bytes to a piped stdin and wake any blocked readers. @param {Uint8Array} bytes */
   writeStdin(bytes) {
     const rest = this.stdin.subarray(this.stdinPos);
     this.stdin = new Uint8Array(rest.length + bytes.length);
@@ -325,7 +320,7 @@ export class Process {
     this.wakeStdinReaders();
   }
 
-  /** End a piped stdin: reads return end of file once its input is read. */
+  /** Close a piped stdin so subsequent reads return EOF once buffered bytes are consumed. */
   closeStdin() {
     this.stdinPipe = false;
     this.wakeStdinReaders();
@@ -344,10 +339,10 @@ export class Process {
   }
 }
 
-/** At most this many threads are prepared ahead for a process. */
+/** Maximum number of spare threads kept pre-instantiated per process. */
 const MAX_SPARE_THREADS = 8;
 
-/** Arguments arrive as BigInts; pointers and sizes are unsigned 32-bit. */
+/** Convert a 64-bit syscall argument to an unsigned 32-bit number. */
 const u32 = (/** @type {bigint} */ a) => Number(BigInt.asUintN(32, a));
 
 export class Kernel {
@@ -355,25 +350,24 @@ export class Kernel {
    * @param {object} opts
    * @param {MemFS} [opts.fs]
    * @param {() => ThreadWorker} opts.createWorker
-   *   A worker running thread-worker.js (`createBrowserWorker`, browser-host.js;
-   *   `createNodeWorker`, node-host.js). Its `onMessage` also passes on
-   *   `{ type: "failed", message }` if the worker itself fails, which ends the
-   *   process the thread is in.
+   *   Factory that creates a worker running `thread-worker.js` (`createBrowserWorker`
+   *   or `createNodeWorker`). Its `onMessage` also passes on `{ type: "failed", message }`
+   *   if the worker itself fails, which ends the process the thread is in.
    * @param {Record<string, Program>} [opts.programs]
-   *   Programs `playground.spawn` can run, by `argv[0]`.
-   * @param {((line: string) => void) | null} [opts.trace] Called with a line of text for each
-   *   system call and thread event.
-   * @param {number} [opts.pool] How many idle workers to keep ready, so that
-   *   starting a thread does not wait for one to be created.
-   * @param {number | null} [opts.retireTimeout] How long, in ms, a finished
-   *   thread's worker has to close itself before it is terminated; null to
-   *   never terminate it (see `retire`).
+   *   Named programs that processes can invoke via `playground.spawn`.
+   * @param {((line: string) => void) | null} [opts.trace]
+   *   Optional callback invoked with a trace line for each syscall and thread event.
+   * @param {number} [opts.pool]
+   *   Number of idle workers to keep pre-spawned in reserve.
+   * @param {number | null} [opts.retireTimeout]
+   *   Milliseconds to wait for a finished worker to close itself before calling
+   *   `terminate()`, or `null` to never force-terminate workers.
    */
   constructor({ fs = new MemFS(), createWorker, programs = {}, trace = null, pool = 0, retireTimeout = 1000 }) {
     this.fs = fs;
-    /** Called with a line of text for each system call and thread event. */
     this.trace = trace;
-    /** System calls made so far, by every process: a sign of progress. */
+    /** Total number of syscalls dispatched across all processes: a sign that a long-running
+     *  program is making progress. */
     this.syscalls = 0;
     this.createWorker = createWorker;
     this.programs = programs;
@@ -387,7 +381,7 @@ export class Kernel {
     /** @type {ThreadWorker[]} */
     this.idleWorkers = [];
     this.refilling = false;
-    /** Functions for `soon` to run, and the channel it runs them through. @type {(() => void)[]} */
+    /** Callbacks queued for `soon()`. @type {(() => void)[]} */
     this.soonQueue = [];
     this.soonChannel = new MessageChannel();
     this.soonChannel.port1.onmessage = () => {
@@ -400,42 +394,43 @@ export class Kernel {
         }
       }
     };
-    // Under Node, a port with a listener would keep the process running.
+    // Avoid keeping the Node event loop alive just for the internal MessageChannel port.
     /** @type {{ unref?: () => void }} */ (/** @type {unknown} */ (this.soonChannel.port1)).unref?.();
-    /** For each module: the most threads a process of it has started. @type {WeakMap<WebAssembly.Module, number>} */
+    /** Peak thread count observed per module, used to size spare thread pools. @type {WeakMap<WebAssembly.Module, number>} */
     this.threadsUsed = new WeakMap();
-    /** Programs to keep a process prepared for (`keepWarm`), by module. @type {Map<WebAssembly.Module, Program>} */
+    /** Programs registered with `keepWarm`, keyed by module. @type {Map<WebAssembly.Module, Program>} */
     this.keptWarm = new Map();
-    /** The prepared process for each of them. @type {Map<WebAssembly.Module, { memory: WebAssembly.Memory, threads: Thread[] }>} */
+    /** Pre-allocated memory and prepared threads for warm modules. @type {Map<WebAssembly.Module, { memory: WebAssembly.Memory, threads: Thread[] }>} */
     this.warm = new Map();
     this.refillPool();
     this.loop();
   }
 
-  // ---- Starting threads ahead of time ----------------------------------------
+  // ---- Worker pooling and thread pre-instantiation -------------------------
   //
-  // Starting a thread means creating a worker (a few ms) and instantiating
-  // the module in it (a few more for rustc). Both can happen before the
-  // thread is needed: idle workers wait in a pool, each process gets its
-  // threads prepared (instantiated, waiting to start) as soon as it starts,
-  // as many as processes of its module have used before, and `keepWarm`
-  // keeps a whole process prepared for the next run of a program.
+  // Spawning a thread requires creating a worker and instantiating the Wasm
+  // module. To keep thread creation fast:
+  //   1. `idleWorkers` maintains a pool of uninitialized workers.
+  //   2. When a process starts, it pre-instantiates as many spare threads as
+  //      previous runs of the same module needed, and reuses exited thread
+  //      instances for subsequent threads.
+  //   3. `keepWarm(program)` pre-allocates memory and spare threads for the
+  //      next run of `program`.
 
-  /** An idle worker from the pool, or a new one. */
+  /** Take an idle worker from the pool, or create a new one. */
   takeWorker() {
     const w = this.idleWorkers.pop() ?? this.createWorker();
     this.refillPool();
     return w;
   }
 
-  /** Let go of a thread's worker. A worker terminated while it runs wasm
-   *  keeps the process's memory reserved in Safari (for as long as the
-   *  page's process lives, reloads included); one terminated while idle or
-   *  waiting (`Atomics.wait`, from JS or wasm) does not. So it is asked to
-   *  close itself (thread-worker.js), and terminated only if it has not
-   *  within `retireTimeout`: still running wasm, or waiting on a futex. A
-   *  killed process's thread closes at its next system call, which throws
-   *  (thread-worker.js).
+  /** Shut down a thread's worker.
+   *  In Safari, calling `worker.terminate()` while a worker is actively running
+   *  Wasm leaks the process's shared WebAssembly.Memory for the lifetime of the
+   *  page process, whereas letting the worker close itself (or terminating it
+   *  while blocked in `Atomics.wait`) frees the memory cleanly. We ask the worker
+   *  to close itself via `{ type: "close" }` and only call `terminate()` if it
+   *  fails to close within `retireTimeout` (e.g. stuck in a Wasm loop or futex).
    *  @param {Thread} t */
   retire(t) {
     // A failed worker may have stopped, or may still run (after an uncaught error, or a message it
@@ -448,11 +443,12 @@ export class Kernel {
     t.worker.postMessage({ type: "close" });
   }
 
-  /** Make idle workers, up to `poolSize`, after the current task. Not in a timer: Chrome never
-   *  shuts down a worker (here, the one running the kernel) after its page is left if, while one
-   *  of its timers was pending, it created a nested worker in a timer task and first sent it a
-   *  message in a later task, as a pooled worker is. It then keeps everything it references,
-   *  processes' memories included, for as long as the browser's process for the page lives. */
+  /** Refill `idleWorkers` up to `poolSize` in a message task.
+   *  We schedule this via `MessageChannel` rather than `setTimeout`: in Chrome,
+   *  if a worker creates a nested worker inside a timer callback while another
+   *  timer is pending and only posts a message to the nested worker in a later
+   *  task, Chrome leaks the parent worker (and all referenced Wasm memories)
+   *  after page navigation. */
   refillPool() {
     if (this.refilling || this.idleWorkers.length >= this.poolSize) return;
     this.refilling = true;
@@ -462,14 +458,14 @@ export class Kernel {
     });
   }
 
-  /** Run `f` after the current task, in a task of its own, as `setTimeout(f, 0)` would, but a
-   *  message task, not a timer one (see `refillPool`). @param {() => void} f */
+  /** Schedule `f` to run in the next macrotask via `MessageChannel`: a message task, not a timer
+   *  task (see `refillPool`). @param {() => void} f */
   soon(f) {
     this.soonQueue.push(f);
     this.soonChannel.port2.postMessage(null);
   }
 
-  /** A thread of `module` instantiated on `memory`, waiting for `startThread`.
+  /** Instantiate `module` with `memory` in a worker, ready for `startThread`.
    *  @param {WebAssembly.Module} module @param {WebAssembly.Memory} memory */
   prepareThread(module, memory) {
     const buffer = new SharedArrayBuffer(CHANNEL_BYTES);
@@ -493,7 +489,7 @@ export class Kernel {
     return Array.from({ length: Math.min(n, MAX_SPARE_THREADS) }, () => this.prepareThread(module, memory));
   }
 
-  /** Keep a process of `program` prepared, so that spawning it starts at once.
+  /** Pre-allocate memory and threads for `program` so the next `spawn` starts immediately.
    *  @param {Program} program */
   keepWarm(program) {
     this.keptWarm.set(program.module, program);
@@ -519,8 +515,7 @@ export class Kernel {
     this.warm.set(module, { memory, threads });
   }
 
-  /** Stop keeping processes prepared, and let go of the prepared ones: each
-   *  holds a memory, which some browsers have few of. */
+  /** Release all pre-warmed processes and their reserved WebAssembly memories. */
   coolDown() {
     this.keptWarm.clear();
     for (const { threads } of this.warm.values()) {
@@ -529,9 +524,7 @@ export class Kernel {
     this.warm.clear();
   }
 
-  /** A new process memory. `maxPages` is a limit, or a list of limits to try
-   *  in turn, largest first: the largest the browser will reserve wins. On
-   *  failure, free the prepared processes' memories and try once more.
+  /** Allocate process memory, cooling down pre-warmed processes and retrying on OOM.
    *  @param {MemoryLimits} limits @param {number | number[]} [maxPages] */
   allocateMemory(limits, maxPages) {
     let memory = tryAllocateMemory(limits, maxPages);
@@ -555,11 +548,8 @@ export class Kernel {
   }
 
   /**
-   * Start a program: `{ module, limits }`, with `limits` from
-   * `importedMemory` (or `{ module, bytes }` to compute them), and optionally
-   * `maxPages`, a limit on its memory below the module's own (or a list of
-   * them to try, largest first). Resolves the returned process's `exited`
-   * with the exit code.
+   * Spawn a new process running `program`. Returns a `Process` whose `exited`
+   * promise resolves to the exit code.
    * @param {Program} program
    * @param {SpawnOptions} [opts]
    */
@@ -581,7 +571,7 @@ export class Kernel {
     return proc;
   }
 
-  /** Start a thread of `proc`: its main thread (`startArg` null), or one it spawned.
+  /** Start a thread in `proc` (`startArg` is null for the main thread).
    *  @param {Process} proc @param {number | null} startArg */
   startThread(proc, startArg) {
     const t = /** @type {RunningThread} */ (proc.spares.shift() ?? this.prepareThread(proc.module, proc.memory));
@@ -608,7 +598,7 @@ export class Kernel {
       return;
     }
     if (m.type === "failed" && prepared.tid === null) {
-      prepared.failed = m; // reported when the thread is started
+      prepared.failed = m; // defer reporting until the spare thread is started
       return;
     }
     const t = prepared.tid === null ? undefined : this.threads.get(prepared.tid);
@@ -620,30 +610,32 @@ export class Kernel {
     } else if (m.type === "thread-exit") {
       this.threads.delete(t.tid);
       t.proc.threads.delete(t);
-      // Its instance can run the process's next thread (`wasi_thread_start` sets up the thread's
-      // stack and TLS from its argument): starting one costs a worker and an instantiation, and
-      // some programs (Lean's language server) start thousands of short-lived threads.
+      // Reuse the exited thread's worker and Wasm instance for the next spawned thread
+      // (`wasi_thread_start` reinitializes the thread stack and TLS from `startArg`): a new
+      // thread costs a worker and an instantiation, and some programs start thousands of
+      // short-lived threads.
       if (t.proc.exitCode === null && t.proc.spares.length < MAX_SPARE_THREADS) {
-        prepared.tid = null; // prepared again: a failure now is reported when it next starts
+        prepared.tid = null;
         t.proc.spares.push(prepared);
       } else {
         this.retire(t);
       }
     } else if (m.type === "trap") {
-      // A Rust panic with panic=abort ends in `unreachable`, after printing
-      // the panic message; the wasm stack is only interesting when tracing.
+      // A program that aborts (a Rust panic with panic=abort, say) ends in `unreachable`, after
+      // printing its message: the wasm stack is only interesting when tracing.
       const stack = this.trace && m.stack ? `${m.stack}\n` : "";
       t.proc.onStderr(encoder.encode(`error: the program trapped (${m.message})\n${stack}`));
       this.exit(t.proc, 134);
     } else if (m.type === "failed") {
-      // Without it, the process would wait for this thread forever.
+      // Without it, the process would wait for this thread forever. Marked failed so that
+      // `retire` terminates the worker, which may not answer "close".
       t.failed = m;
       t.proc.onStderr(encoder.encode(`error: a thread's worker stopped: ${m.message}\n`));
       this.exit(t.proc, 134);
     }
   }
 
-  /** Terminate a process (and all its threads) with exit code `code`.
+  /** Terminate `proc` and all of its threads with `code`.
    *  @param {Process} proc */
   kill(proc, code = 137) {
     this.exit(proc, code);
@@ -658,12 +650,11 @@ export class Kernel {
     for (const timer of proc.timers) clearTimeout(timer);
     proc.timers.clear();
     proc.closeStdin();
-    // A killed compiler takes its linker with it.
+    // The processes it started with playground.spawn end with it.
     for (const child of proc.children) this.exit(child, code);
     for (const t of proc.threads) {
       this.threads.delete(t.tid);
-      // Wake a thread waiting for a system call (thread-worker.js), so that
-      // it returns to its event loop and can close.
+      // Wake the thread if it is blocked in a syscall so it unwinds to its event loop and closes.
       Atomics.store(t.ctl, 0, KILLED);
       Atomics.notify(t.ctl, 0);
       this.retire(t);
@@ -672,12 +663,12 @@ export class Kernel {
     for (const t of proc.spares) this.retire(t);
     proc.spares = [];
     this.threadsUsed.set(proc.module, Math.max(this.threadsUsed.get(proc.module) ?? 0, proc.started));
-    // The next process of a kept-warm program, prepared while nothing runs.
+    // The next process of a kept-warm program, prepared once nothing else runs.
     if (this.keptWarm.has(proc.module)) this.soon(() => this.warmUp(proc.module));
     proc.resolveExit(code);
   }
 
-  /** Handle the system call `t` has made. @param {RunningThread} t */
+  /** Dispatch the pending syscall on `t`. @param {RunningThread} t */
   dispatch(t) {
     this.syscalls++;
     const name = SYSCALLS[t.ctl[1]];
@@ -740,7 +731,7 @@ export class Kernel {
   /** @type {SysCall} */
   sys_environ_sizes_get(p, a) { return this.sizes(p, p.env, u32(a[0]), u32(a[1])); }
 
-  /** The time on clock `id` (0: real time; others: monotonic), in ns. @param {number} id */
+  /** Current time in nanoseconds for clock `id` (0 = realtime, others = monotonic). @param {number} id */
   now(id) {
     if (id === 0) return BigInt(Date.now()) * 1000000n;
     return BigInt(Math.round(performance.now() * 1e6));
@@ -760,8 +751,8 @@ export class Kernel {
     return E.SUCCESS;
   }
   sys_sched_yield() { return E.SUCCESS; }
-  // Exit statuses are 8 bits, as on Unix: exit(-1) is 255. (It also keeps
-  // them apart from playground_spawn's -1, "no such program".)
+  // Mask exit status to 8 bits, matching Unix waitstatus and keeping exit codes
+  // distinct from `playground.spawn`'s -1 error return.
   /** @type {SysCall} */
   sys_proc_exit(p, a) { this.exit(p, u32(a[0]) & 0xff); return undefined; }
   sys_proc_raise() { return E.NOSYS; }
@@ -854,7 +845,6 @@ export class Kernel {
       if (at < 0) return E.INVAL;
     }
     if (f instanceof Stdio && p.stdinPipe && p.stdinPos >= p.stdin.length) {
-      // block until there is input (or its end)
       return /** @type {Promise<void>} */ (new Promise((wake) => p.stdinWaiters.push(wake)))
         .then(() => (p.exitCode === null ? this.read(p, fd, iovs, n, nreadPtr, at) : E.SUCCESS));
     }
@@ -927,7 +917,7 @@ export class Kernel {
     return E.SUCCESS;
   }
 
-  /** Write the stat of `node` (null: a character device) at `o`.
+  /** Write a WASI `filestat` struct for `node` (or null for a character device) at `o`.
    *  @param {Process} p @param {File | Dir | null} node @param {number} o */
   filestat(p, node, o) {
     const v = p.view();
@@ -1022,9 +1012,9 @@ export class Kernel {
 
   // ---- Paths ---------------------------------------------------------------
 
-  /** The absolute path of `path` relative to directory descriptor `fd`, or an error number: BADF
-   *  if `fd` is not a directory, NOTCAPABLE if the path leads out of the preopened directory `fd`
-   *  is in.
+  /** Resolve a path relative to directory descriptor `fd` into a normalized
+   *  absolute path. Returns `E.BADF` if `fd` is not an open directory, or
+   *  `E.NOTCAPABLE` if the resolved path escapes `fd`'s preopened root.
    *  @param {Process} p @param {number} fd @param {number} ptr @param {number} len */
   resolve(p, fd, ptr, len) {
     const d = p.fds.get(fd);
@@ -1125,7 +1115,7 @@ export class Kernel {
     if (target === node) return E.SUCCESS;
     if (node instanceof Dir) {
       const [f, t] = [components(from), components(to)];
-      if (t.length > f.length && f.every((c, i) => t[i] === c)) return E.INVAL; // into itself
+      if (t.length > f.length && f.every((c, i) => t[i] === c)) return E.INVAL;
       if (target && !(target instanceof Dir)) return E.NOTDIR;
       if (target?.entries.size) return E.NOTEMPTY;
     } else if (target instanceof Dir) {
@@ -1151,12 +1141,12 @@ export class Kernel {
   }
 
   /**
-   * `playground.spawn(argv, argc) -> i32`: run the program `argv[0]` from
-   * `programs` to completion with arguments `argv` (an array of
-   * NUL-terminated strings) and the same filesystem and output, returning
-   * its exit code, or -1 if there is no such program.
+   * `playground.spawn(argv, argc) -> i32`: run the registered program matching
+   * the basename of `argv[0]` to completion on the same filesystem, inheriting
+   * environment and stdio callbacks. Returns the child's exit code, or -1 if
+   * no matching program is registered.
+   * @type {SysCall}
    */
-  /** @type {SysCall} */
   sys_playground_spawn(p, a) {
     const v = p.view();
     const argv = [];
