@@ -785,6 +785,10 @@ export class Kernel {
   write(p, fd, iovs, n, nwrittenPtr, at) {
     const f = p.fds.get(fd);
     if (!f || f instanceof OpenDir) return E.BADF;
+    if (at !== null) {
+      if (f instanceof Stdio) return E.SPIPE;
+      if (at < 0) return E.INVAL;
+    }
     const v = p.view();
     let total = 0;
     const chunks = [];
@@ -811,6 +815,10 @@ export class Kernel {
   read(p, fd, iovs, n, nreadPtr, at) {
     const f = p.fds.get(fd);
     if (!f || f instanceof OpenDir) return f ? E.ISDIR : E.BADF;
+    if (at !== null) {
+      if (f instanceof Stdio) return E.SPIPE;
+      if (at < 0) return E.INVAL;
+    }
     if (f instanceof Stdio && p.stdinPipe && p.stdinPos >= p.stdin.length) {
       // block until there is input (or its end)
       return /** @type {Promise<void>} */ (new Promise((wake) => p.stdinWaiters.push(wake)))
@@ -850,7 +858,7 @@ export class Kernel {
     const off = Number(a[1]);
     const whence = u32(a[2]);
     const base = whence === 0 ? 0 : whence === 1 ? f.pos : f.node.size;
-    if (base + off < 0) return E.INVAL;
+    if (whence > 2 || base + off < 0) return E.INVAL;
     f.pos = base + off;
     p.view().setBigUint64(u32(a[3]), BigInt(f.pos), true);
     return E.SUCCESS;
@@ -911,7 +919,9 @@ export class Kernel {
   sys_fd_filestat_set_size(p, a) {
     const f = p.fds.get(u32(a[0]));
     if (!(f instanceof OpenFile)) return E.BADF;
-    f.node.resize(Number(a[1]));
+    const size = Number(a[1]);
+    if (size < 0) return E.INVAL;
+    f.node.resize(size);
     return E.SUCCESS;
   }
   /** @type {SysCall} */

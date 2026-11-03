@@ -118,18 +118,23 @@ test("write, read back, seek and tell", async () => {
   assert.equal((await h.read(fd)).text, "", "at the end, a read returns nothing");
   assert.deepEqual(h.seek(fd, -5, SEEK.END), { errno: E.SUCCESS, pos: 6 });
   assert.equal(h.seek(fd, -1, SEEK.SET).errno, E.INVAL);
+  assert.equal(h.seek(fd, 0, 3).errno, E.INVAL);
   const o = h.alloc(8);
   assert.equal(h.sys("fd_tell", fd, o), E.SUCCESS);
   assert.equal(h.u64(o), 6n);
 });
 
-test("pread and pwrite leave the position alone", async () => {
+test("pread and pwrite leave the file position unchanged and validate offsets", async () => {
   const h = setup();
   const fd = await h.create("/f.txt", "abcdef");
   h.seek(fd, 1, SEEK.SET);
   assert.equal((await h.read(fd, 2, 3)).text, "de");
   assert.equal(h.write(fd, "XY", 4).errno, E.SUCCESS);
   assert.equal((await h.read(fd)).text, "bcdXY");
+  assert.equal((await h.read(fd, 2, -1)).errno, E.INVAL);
+  assert.equal(h.write(fd, "Z", -1).errno, E.INVAL);
+  assert.equal((await h.read(0, 2, 0)).errno, E.SPIPE);
+  assert.equal(h.write(1, "Z", 0).errno, E.SPIPE);
 });
 
 test("reading or seeking past the end; writing there leaves a hole of zeros", async () => {
@@ -552,4 +557,11 @@ test("rename onto the root is refused, and adds no nameless entry", async () => 
   assert.notEqual(h.rename("/d", "/"), E.SUCCESS);
   assert.ok(!h.kernel.fs.root.entries.has(""));
   assert.equal(h.stat("/d").errno, E.SUCCESS);
+});
+
+test("fd_filestat_set_size of a negative size is refused", async () => {
+  const h = setup();
+  const fd = await h.create("/f", "abc");
+  assert.equal(h.sys("fd_filestat_set_size", fd, -1), E.INVAL);
+  assert.equal(h.stat("/f").size, 3);
 });
